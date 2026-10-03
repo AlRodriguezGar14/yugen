@@ -6,6 +6,28 @@
     "orientation": "portrait",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "light",
+    "plugins": [
+      [
+        "expo-image-picker",
+        {
+          "cameraPermission": "Yugen uses the camera to capture text for learning.",
+          "photosPermission": "Yugen uses a selected photo to capture text for learning.",
+          "microphonePermission": false
+        }
+      ],
+      [
+        "react-native-vision-camera-mlkit",
+        {
+          "textRecognition": true,
+          "textRecognitionChinese": false,
+          "textRecognitionDevanagari": false,
+          "textRecognitionJapanese": true,
+          "textRecognitionKorean": false,
+          "barcodeScanning": true
+        }
+      ],
+      "expo-router"
+    ],
     "ios": {
       "supportsTablet": true,
       "bundleIdentifier": "com.yugen.dev"
