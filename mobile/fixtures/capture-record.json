@@ -1,0 +1,28 @@
+{
+  "id": "fixture-menu-001",
+  "createdAt": "2026-09-30T00:00:00.000Z",
+  "language": "ja",
+  "source": "library",
+  "imageUri": "file:///private/captures/fixture-menu-001.jpg",
+  "imageMetadata": {
+    "assetId": "asset-fixture-001",
+    "fileName": "menu-sample.jpg",
+    "fileSize": 182400,
+    "mimeType": "image/jpeg",
+    "width": 1200,
+    "height": 800
+  },
+  "rawText": "本日のおすすめ\n鶏肉をください。\n",
+  "regions": [
+    {
+      "id": "0:1",
+      "text": "鶏肉をください。",
+      "bounds": { "x": 0.08, "y": 0.34, "width": 0.72, "height": 0.09 },
+      "confidence": 0.91,
+      "review": { "selected": true, "correctedText": "鶏肉をください。" }
+    }
+  ],
+  "correctedText": "鶏肉をください。",
+  "selectedRegionId": "0:1",
+  "status": "complete"
+}

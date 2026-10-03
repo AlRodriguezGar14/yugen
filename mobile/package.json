@@ -38,7 +38,9 @@
     "web": "expo start --web",
     "lint": "expo lint",
     "typecheck": "tsc --noEmit",
-    "doctor": "pnpm dlx expo-doctor"
+    "doctor": "pnpm dlx expo-doctor",
+    "test:capture": "node --test test/capture-record.fixture.test.mjs",
+    "test:workflow": "node --test test/capture-workflow.test.mjs"
   },
   "private": true
 }
