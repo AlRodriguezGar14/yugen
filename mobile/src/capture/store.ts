@@ -1,11 +1,17 @@
 import * as SQLite from 'expo-sqlite';
 import { Directory, File, Paths } from 'expo-file-system';
-import { rowGroupsForCapture, unsavedRows } from './review';
 import { captureFromRow, captureToRow, type CaptureRecord, type CaptureRow, type TextGroup, type AnalysisToken, type AnalysisTokenReview, type NormalizedBounds } from './types';
 import { hiraganaReading, isContentToken } from './analysis';
+import { rowGroupsForCapture, unsavedRows } from './review';
 import { practiceAnswer, type PracticeAnswer } from './studyCards';
 
 let databasePromise: Promise<SQLite.SQLiteDatabase> | undefined;
+// ponytail: in-process tombstones cover foreground OCR; persist them if work survives app restarts.
+const deletedCaptureIds = new Set<string>();
+
+export function isCaptureDeleted(id: string): boolean {
+  return deletedCaptureIds.has(id);
+}
 
 async function database(): Promise<SQLite.SQLiteDatabase> {
   if (!databasePromise) {
@@ -85,12 +91,21 @@ async function database(): Promise<SQLite.SQLiteDatabase> {
       if (!cardColumns.has('candidate_id')) await db.execAsync('ALTER TABLE study_cards ADD COLUMN candidate_id TEXT');
       if (!cardColumns.has('source_regions')) await db.execAsync('ALTER TABLE study_cards ADD COLUMN source_regions TEXT');
       if (!cardColumns.has('personal_meaning')) await db.execAsync('ALTER TABLE study_cards ADD COLUMN personal_meaning TEXT');
-      await db.execAsync("CREATE UNIQUE INDEX IF NOT EXISTS sentence_card_group ON study_cards(group_id) WHERE kind = 'sentence'");
-      // Practice cards are optional, independent exercises linked to saved knowledge.
+      // Optional practice cards: linked to a knowledge entry (study_cards row), or detached with an answer snapshot.
       await db.execAsync(`
-        CREATE TABLE IF NOT EXISTS practice_cards (id TEXT PRIMARY KEY NOT NULL, entry_id TEXT, answer_json TEXT, created_at TEXT NOT NULL, capture_id TEXT);
+        CREATE TABLE IF NOT EXISTS practice_cards (id TEXT PRIMARY KEY NOT NULL, entry_id TEXT, answer_json TEXT, created_at TEXT NOT NULL);
         CREATE UNIQUE INDEX IF NOT EXISTS practice_card_entry ON practice_cards(entry_id) WHERE entry_id IS NOT NULL;
       `);
+      // Source photo provenance survives detaching, so deleting the photo still removes its snapshot cards.
+      const practiceColumns = new Set((await db.getAllAsync<{ name: string }>('PRAGMA table_info(practice_cards)')).map((column) => column.name));
+      if (!practiceColumns.has('capture_id')) await db.execAsync('ALTER TABLE practice_cards ADD COLUMN capture_id TEXT');
+      // Repair only provable orphans of the separate-connection delete bug: a text card whose text no longer exists.
+      // Words keep their snapshots and are detached instead; photos and sources are untouched.
+      await db.execAsync(`
+        DELETE FROM study_cards WHERE kind = 'sentence' AND group_id IS NOT NULL AND group_id NOT IN (SELECT id FROM text_groups);
+        UPDATE study_cards SET group_id = NULL WHERE kind = 'word' AND group_id IS NOT NULL AND group_id NOT IN (SELECT id FROM text_groups);
+      `);
+      await db.execAsync("CREATE UNIQUE INDEX IF NOT EXISTS sentence_card_group ON study_cards(group_id) WHERE kind = 'sentence'");
       if (schemaVersion < 3) {
         await db.execAsync(`
           INSERT OR IGNORE INTO text_groups(id, capture_id, region_ids, text, analysis_json, review_json, saved_at)
@@ -121,7 +136,9 @@ async function database(): Promise<SQLite.SQLiteDatabase> {
 }
 
 export async function saveCapture(capture: CaptureRecord): Promise<void> {
+  if (deletedCaptureIds.has(capture.id)) return;
   const db = await database();
+  if (deletedCaptureIds.has(capture.id)) return;
   await writeCapture(db, capture);
 }
 
@@ -170,21 +187,122 @@ async function writeCapture(db: SQLite.SQLiteDatabase, capture: CaptureRecord): 
   );
 }
 
+export async function saveAnalysisForText(
+  id: string,
+  correctedText: string,
+  analysis: NonNullable<CaptureRecord['analysis']>,
+): Promise<boolean> {
+  const db = await database();
+  const result = await db.runAsync(
+    'UPDATE captures SET analysis_json = ? WHERE id = ? AND corrected_text = ?',
+    JSON.stringify(analysis),
+    id,
+    correctedText,
+  );
+  return result.changes > 0;
+}
+
+export async function saveAnalysisReviewForText(
+  id: string,
+  correctedText: string,
+  analysisReview: CaptureRecord['analysisReview'],
+): Promise<boolean> {
+  const db = await database();
+  const result = await db.runAsync(
+    'UPDATE captures SET analysis_review_json = ? WHERE id = ? AND corrected_text = ?',
+    JSON.stringify(analysisReview),
+    id,
+    correctedText,
+  );
+  return result.changes > 0;
+}
+
+/** Saves only translation while the exact corrected source still exists. */
+export async function saveTranslationForText(
+  id: string,
+  correctedText: string,
+  translation: NonNullable<CaptureRecord['sentenceTranslation']>,
+): Promise<boolean> {
+  if (translation.sourceText !== correctedText) return false;
+  const db = await database();
+  const result = await db.runAsync(
+    'UPDATE captures SET translation_json = ? WHERE id = ? AND corrected_text = ?',
+    JSON.stringify(translation),
+    id,
+    correctedText,
+  );
+  return result.changes > 0;
+}
+
+/** Every surviving source photo, drafts included; the Library labels which are saved, unsaved or unread. */
+export async function loadLibraryCaptures(): Promise<CaptureRecord[]> {
+  const db = await database();
+  const rows = await db.getAllAsync<CaptureRow>('SELECT * FROM captures ORDER BY created_at DESC');
+  return rows.map(captureFromRow);
+}
+
+export async function loadOcrReviewCaptures(): Promise<CaptureRecord[]> {
+  const db = await database();
+  const rows = await db.getAllAsync<CaptureRow>('SELECT * FROM captures ORDER BY created_at DESC');
+  const saved = new Map((await db.getAllAsync<{ id: string; text: string }>('SELECT id, text FROM text_groups')).map((group) => [group.id, group.text]));
+  return rows.map(captureFromRow).filter((capture) => capture.status !== 'complete'
+    || !rowGroupsForCapture(capture).length || unsavedRows(capture, saved).length > 0);
+}
+
+/** Removes the private image before its retryable record; throws if either deletion fails. */
+export async function deleteCapture(id: string): Promise<boolean> {
+  deletedCaptureIds.add(id);
+  try {
+    const db = await database();
+    const row = await db.getFirstAsync<CaptureRow>('SELECT * FROM captures WHERE id = ?', id);
+    if (row) {
+      const capturesDirectory = new Directory(Paths.document, 'captures');
+      const capturesPrefix = `${capturesDirectory.uri.replace(/\/$/, '')}/`;
+      if (row.image_uri.startsWith(capturesPrefix)) {
+        const file = new File(row.image_uri);
+        if (file.exists) file.delete();
+      }
+    }
+    await db.withExclusiveTransactionAsync(async (txn) => {
+      // Separate connection, foreign keys OFF: every dependent row is removed explicitly.
+      await txn.runAsync('DELETE FROM practice_cards WHERE capture_id = ? OR entry_id IN (SELECT id FROM study_cards WHERE capture_id = ?)', id, id);
+      await txn.runAsync('DELETE FROM study_cards WHERE capture_id = ?', id);
+      await txn.runAsync('DELETE FROM text_groups WHERE capture_id = ?', id);
+      await txn.runAsync('DELETE FROM captures WHERE id = ?', id);
+    });
+    return true;
+  } catch (error) {
+    deletedCaptureIds.delete(id);
+    throw error;
+  }
+}
+
+export async function loadCaptureById(id: string): Promise<CaptureRecord | null> {
+  const db = await database();
+  const row = await db.getFirstAsync<CaptureRow>('SELECT * FROM captures WHERE id = ?', id);
+  return row ? captureFromRow(row) : null;
+}
 
 type GroupRow = { id: string; capture_id: string; region_ids: string; text: string; analysis_json: string | null; review_json: string; saved_at: string };
 function groupFromRow(row: GroupRow): TextGroup {
   return { id: row.id, captureId: row.capture_id, regionIds: JSON.parse(row.region_ids), text: row.text,
     analysis: row.analysis_json ? JSON.parse(row.analysis_json) : null, analysisReview: JSON.parse(row.review_json), savedAt: row.saved_at };
 }
-export async function loadTextGroups(captureId: string): Promise<TextGroup[]> {
+export async function loadTextGroup(id: string): Promise<TextGroup | null> {
   const db = await database();
-  const rows = await db.getAllAsync<GroupRow>('SELECT * FROM text_groups WHERE capture_id = ? ORDER BY saved_at DESC', captureId);
+  const row = await db.getFirstAsync<GroupRow>('SELECT * FROM text_groups WHERE id = ?', id);
+  return row ? groupFromRow(row) : null;
+}
+export async function loadTextGroups(captureId?: string): Promise<TextGroup[]> {
+  const db = await database();
+  const rows = captureId ? await db.getAllAsync<GroupRow>('SELECT * FROM text_groups WHERE capture_id = ? ORDER BY saved_at DESC', captureId)
+    : await db.getAllAsync<GroupRow>('SELECT * FROM text_groups ORDER BY saved_at DESC');
   return rows.map(groupFromRow);
 }
 /** Writes the source, its group and the group's sentence card; callers own the surrounding transaction. */
 async function writeGroup(txn: SQLite.SQLiteDatabase, capture: CaptureRecord, group: TextGroup): Promise<void> {
   if (group.captureId !== capture.id || !group.text.trim()) throw new Error('This group cannot be saved.');
-  if (!await txn.getFirstAsync('SELECT id FROM captures WHERE id = ?', capture.id)) throw new Error('The source was deleted.');
+  if (deletedCaptureIds.has(capture.id) || !await txn.getFirstAsync('SELECT id FROM captures WHERE id = ?', capture.id)) throw new Error('The source was deleted.');
   await writeCapture(txn, capture);
   const validAnalysis = group.analysis?.normalizedText === group.text ? group.analysis : null;
   const savedAt = group.savedAt ?? new Date().toISOString();
@@ -205,7 +323,7 @@ export type RecordedWords = { added: number; existing: number; pending: number; 
  * Returns null when the text has no current readings, so only the text was saved.
  */
 export async function saveTextGroup(capture: CaptureRecord, group: TextGroup): Promise<RecordedWords | null> {
-  if (group.captureId !== capture.id || !group.text.trim()) throw new Error('This group cannot be saved.');
+  if (group.captureId !== capture.id || !group.text.trim() || deletedCaptureIds.has(capture.id)) throw new Error('This group cannot be saved.');
   const analysis = group.analysis?.normalizedText === group.text ? group.analysis : null;
   const counts: RecordedWords = { added: 0, existing: 0, pending: 0, unknown: 0 };
   const db = await database();
@@ -224,62 +342,28 @@ export async function saveTextGroup(capture: CaptureRecord, group: TextGroup): P
   });
   return analysis ? counts : null;
 }
-
-/** Original photo lines a card came from, snapshotted at first save so later edits or deletions never move it. */
-export type SourceRegion = { id: string; bounds: NormalizedBounds };
-
-function sourceRegionsJson(capture: CaptureRecord, regionIds: string[]): string | null {
-  const regions = capture.regions.filter((region) => regionIds.includes(region.id)).map(({ id, bounds }) => ({ id, bounds }));
-  return regions.length ? JSON.stringify(regions) : null;
+export async function saveGroupAnalysisForText(id: string, text: string, analysis: NonNullable<TextGroup['analysis']>, review: TextGroup['analysisReview'] = {}): Promise<boolean> {
+  if (analysis.normalizedText !== text) return false;
+  const db = await database();
+  return (await db.runAsync('UPDATE text_groups SET analysis_json = ?, review_json = ? WHERE id = ? AND text = ?', JSON.stringify(analysis), JSON.stringify(review), id, text)).changes > 0;
 }
-
-type ResolvedWord = { lemma: string; reading: string; snapshot: AnalysisToken; candidateId: string | null };
-
 /**
- * The approved dictionary entry of a token: an explicit valid choice, the only entry with a reading and gloss,
- * or a labeled curated term. A LIKELY hint or a parser reading alone never approves a sense. Written-form evidence
- * the parser could not place in context stays pending unless the user explicitly approves it (`explicitSave`).
+ * Removes a saved text and its sentence card; words recorded from it stay in Vocabulary with their own source
+ * snapshot. Exclusive transactions run on a separate connection with foreign keys OFF, so every dependent row is
+ * handled explicitly rather than by cascade. A deleted legacy text also clears its capture's legacy saved flag,
+ * which would otherwise present it as saved again.
  */
-export function resolveWord(token: AnalysisToken, review?: AnalysisTokenReview, explicitSave = false): ResolvedWord | 'pending' | 'unknown' {
-  const eligible = token.dictionaryCandidates.filter((candidate) => candidate.reading.trim() && candidate.meanings.some((meaning) => meaning.trim()));
-  const explicit = token.dictionaryCandidates.find((candidate) => candidate.id === review?.dictionaryCandidateId);
-  const chosen = explicit ?? (eligible.length === 1 ? eligible[0] : null);
-  if (!explicit && (eligible.length > 1 || (token.writtenFormEvidence && !explicitSave && eligible.length))) return 'pending';
-  if (chosen ? !eligible.includes(chosen) : !token.curatedMeaning?.trim()) return 'unknown';
-  const lemma = token.lemma.normalize('NFC').trim();
-  const reading = hiraganaReading((chosen?.reading ?? token.reading ?? '').normalize('NFC').trim());
-  if (!lemma || !reading) return 'unknown';
-  return { lemma, reading, candidateId: chosen?.id ?? null, snapshot: { ...token, surface: lemma, reading, dictionaryCandidates: chosen ? [chosen] : [] } };
-}
-
-/** Inserts an approved word snapshot; an already saved language + lemma + reading keeps its original sense. */
-async function writeWord(txn: SQLite.SQLiteDatabase, capture: CaptureRecord, word: ResolvedWord, tokenIndex: number, text: string, group?: TextGroup): Promise<'added' | 'existing'> {
-  if (await txn.getFirstAsync("SELECT id FROM study_cards WHERE kind = 'word' AND language = ? AND lemma = ? AND reading = ?", capture.language, word.lemma, word.reading)) return 'existing';
-  await txn.runAsync(`INSERT INTO study_cards
-    (id,capture_id,kind,language,lemma,reading,token_index,source_text,created_at,group_id,word_snapshot,candidate_id,source_regions)
-    VALUES (?,?,'word',?,?,?,?,?,?,?,?,?,?)`,
-    `word:${JSON.stringify([capture.language, word.lemma, word.reading])}`, capture.id, capture.language, word.lemma, word.reading, tokenIndex,
-    text, new Date().toISOString(), group?.id ?? null, JSON.stringify(word.snapshot), word.candidateId, sourceRegionsJson(capture, group?.regionIds ?? []));
-  return 'added';
-}
-
-/** Explicit vocabulary approval of one word, saved atomically with its parent row or paragraph. */
-export async function addWordCard(capture: CaptureRecord, tokenIndex: number, reading: string, group: TextGroup): Promise<WordSaveOutcome> {
-  const token = group.analysis?.normalizedText === group.text ? group.analysis.tokens[tokenIndex] : null;
-  if (!token || !Number.isInteger(tokenIndex)) return null;
-  const word = resolveWord(token, group.analysisReview[String(tokenIndex)], true);
-  if (typeof word === 'string' || word.reading !== hiraganaReading(reading.normalize('NFC').trim())) return null;
-  let saved: WordSaveOutcome = null;
+export async function deleteTextGroup(id: string, options: EntryDeletion = {}): Promise<void> {
   const db = await database();
   await db.withExclusiveTransactionAsync(async (txn) => {
-    await writeGroup(txn, capture, group);
-    saved = await writeWord(txn, capture, word, tokenIndex, group.text, group);
+    const entry = await txn.getFirstAsync<StudyCardRow>("SELECT * FROM study_cards WHERE kind = 'sentence' AND group_id = ?", id);
+    if (entry) await settlePracticeCards(txn, cardFromRow(entry), options);
+    await txn.runAsync("UPDATE study_cards SET group_id = NULL WHERE kind = 'word' AND group_id = ?", id);
+    await txn.runAsync("DELETE FROM study_cards WHERE kind = 'sentence' AND group_id = ?", id);
+    if (id.startsWith('legacy:')) await txn.runAsync('UPDATE captures SET saved_at = NULL WHERE id = ?', id.slice('legacy:'.length));
+    await txn.runAsync('DELETE FROM text_groups WHERE id = ?', id);
   });
-  return saved;
 }
-
-/** 'added' or 'existing' (same language + lemma + reading already saved); null when the approval no longer holds. */
-export type WordSaveOutcome = 'added' | 'existing' | null;
 
 export type StudyCard = {
   id: string;
@@ -311,23 +395,12 @@ function cardFromRow(row: StudyCardRow): StudyCard {
     sourceRegions: row.source_regions ? JSON.parse(row.source_regions) as SourceRegion[] : null, personalMeaning: row.personal_meaning ?? null };
 }
 
+/** Original photo lines a card came from, snapshotted at first save so later edits or deletions never move it. */
+export type SourceRegion = { id: string; bounds: NormalizedBounds };
 
-export async function loadCaptureById(id: string): Promise<CaptureRecord | null> {
-  const db = await database();
-  const row = await db.getFirstAsync<CaptureRow>('SELECT * FROM captures WHERE id = ?', id);
-  return row ? captureFromRow(row) : null;
-}
-
-export async function loadLibraryCaptures(): Promise<CaptureRecord[]> {
-  const db = await database();
-  const rows = await db.getAllAsync<CaptureRow>('SELECT * FROM captures ORDER BY created_at DESC');
-  return rows.map(captureFromRow);
-}
-
-export async function loadTextGroup(id: string): Promise<TextGroup | null> {
-  const db = await database();
-  const row = await db.getFirstAsync<GroupRow>('SELECT * FROM text_groups WHERE id = ?', id);
-  return row ? groupFromRow(row) : null;
+function sourceRegionsJson(capture: CaptureRecord, regionIds: string[]): string | null {
+  const regions = capture.regions.filter((region) => regionIds.includes(region.id)).map(({ id, bounds }) => ({ id, bounds }));
+  return regions.length ? JSON.stringify(regions) : null;
 }
 
 export async function loadStudyCards(): Promise<StudyCard[]> {
@@ -335,6 +408,7 @@ export async function loadStudyCards(): Promise<StudyCard[]> {
   return (await db.getAllAsync<StudyCardRow>('SELECT * FROM study_cards ORDER BY created_at DESC, id')).map(cardFromRow);
 }
 
+/** The saved text entry of a group, by its group link (legacy texts keep their original `sentence:<captureId>` id). */
 export async function loadTextEntryForGroup(groupId: string): Promise<StudyCard | null> {
   const db = await database();
   const row = await db.getFirstAsync<StudyCardRow>("SELECT * FROM study_cards WHERE kind = 'sentence' AND group_id = ?", groupId);
@@ -356,45 +430,76 @@ export async function enrichWordCardCharacters(id: string, details: NonNullable<
     JSON.stringify({ ...token, kanjiDetails: details.filter((detail) => token.scriptUnits.includes(detail.character)) }), id, row.word_snapshot);
 }
 
-export async function saveAnalysisForText(
-  id: string,
-  correctedText: string,
-  analysis: NonNullable<CaptureRecord['analysis']>,
-): Promise<boolean> {
-  const db = await database();
-  const result = await db.runAsync(
-    'UPDATE captures SET analysis_json = ? WHERE id = ? AND corrected_text = ?',
-    JSON.stringify(analysis),
-    id,
-    correctedText,
-  );
-  return result.changes > 0;
+type ResolvedWord = { lemma: string; reading: string; snapshot: AnalysisToken; candidateId: string | null };
+
+/**
+ * The approved dictionary entry of a token: an explicit valid choice, the only entry with a reading and gloss,
+ * or a labeled curated term. A LIKELY hint or a parser reading alone never approves a sense. Written-form evidence
+ * the parser could not place in context stays pending unless the user explicitly approves it (`explicitSave`).
+ */
+export function resolveWord(token: AnalysisToken, review?: AnalysisTokenReview, explicitSave = false): ResolvedWord | 'pending' | 'unknown' {
+  const eligible = token.dictionaryCandidates.filter((candidate) => candidate.reading.trim() && candidate.meanings.some((meaning) => meaning.trim()));
+  const explicit = token.dictionaryCandidates.find((candidate) => candidate.id === review?.dictionaryCandidateId);
+  const chosen = explicit ?? (eligible.length === 1 ? eligible[0] : null);
+  if (!explicit && (eligible.length > 1 || (token.writtenFormEvidence && !explicitSave && eligible.length))) return 'pending';
+  if (chosen ? !eligible.includes(chosen) : !token.curatedMeaning?.trim()) return 'unknown';
+  const lemma = token.lemma.normalize('NFC').trim();
+  const reading = hiraganaReading((chosen?.reading ?? token.reading ?? '').normalize('NFC').trim());
+  if (!lemma || !reading) return 'unknown';
+  return { lemma, reading, candidateId: chosen?.id ?? null, snapshot: { ...token, surface: lemma, reading, dictionaryCandidates: chosen ? [chosen] : [] } };
 }
 
-export async function saveAnalysisReviewForText(
-  id: string,
-  correctedText: string,
-  analysisReview: CaptureRecord['analysisReview'],
-): Promise<boolean> {
-  const db = await database();
-  const result = await db.runAsync(
-    'UPDATE captures SET analysis_review_json = ? WHERE id = ? AND corrected_text = ?',
-    JSON.stringify(analysisReview),
-    id,
-    correctedText,
-  );
-  return result.changes > 0;
+/** Inserts an approved word snapshot; an already saved language + lemma + reading keeps its original sense. */
+async function writeWord(txn: SQLite.SQLiteDatabase, capture: CaptureRecord, word: ResolvedWord, tokenIndex: number, text: string, group?: TextGroup): Promise<'added' | 'existing'> {
+  if (await txn.getFirstAsync("SELECT id FROM study_cards WHERE kind = 'word' AND language = ? AND lemma = ? AND reading = ?", capture.language, word.lemma, word.reading)) return 'existing';
+  // An edited word keeps its original id, so the natural id of this lemma+reading may already be taken.
+  const naturalId = `word:${JSON.stringify([capture.language, word.lemma, word.reading])}`;
+  const id = await txn.getFirstAsync('SELECT id FROM study_cards WHERE id = ?', naturalId) ? `${naturalId}#${Date.now().toString(36)}` : naturalId;
+  await txn.runAsync(`INSERT INTO study_cards
+    (id,capture_id,kind,language,lemma,reading,token_index,source_text,created_at,group_id,word_snapshot,candidate_id,source_regions)
+    VALUES (?,?,'word',?,?,?,?,?,?,?,?,?,?)`,
+    id, capture.id, capture.language, word.lemma, word.reading, tokenIndex,
+    text, new Date().toISOString(), group?.id ?? null, JSON.stringify(word.snapshot), word.candidateId, sourceRegionsJson(capture, group?.regionIds ?? []));
+  return 'added';
 }
 
-export async function saveGroupAnalysisForText(id: string, text: string, analysis: NonNullable<TextGroup['analysis']>, review: TextGroup['analysisReview'] = {}): Promise<boolean> {
-  if (analysis.normalizedText !== text) return false;
+/**
+ * Explicit vocabulary approval of one word, saved atomically with its parent text. An unsaved group
+ * (`savedAt` null, from the live editor) is saved with it; a saved group must still have the same text.
+ */
+export async function addWordCard(capture: CaptureRecord, tokenIndex: number, reading: string, group?: TextGroup): Promise<WordSaveOutcome> {
+  const text = group?.text ?? capture.correctedText;
+  const analysis = group?.analysis ?? capture.analysis;
+  const review = group?.analysisReview ?? capture.analysisReview;
+  const token = analysis?.normalizedText === text ? analysis.tokens[tokenIndex] : null;
+  if (!token || !Number.isInteger(tokenIndex) || deletedCaptureIds.has(capture.id)) return null;
+  const word = resolveWord(token, review[String(tokenIndex)], true);
+  if (typeof word === 'string' || word.reading !== hiraganaReading(reading.normalize('NFC').trim())) return null;
+  let saved: WordSaveOutcome = null;
   const db = await database();
-  return (await db.runAsync('UPDATE text_groups SET analysis_json = ?, review_json = ? WHERE id = ? AND text = ?', JSON.stringify(analysis), JSON.stringify(review), id, text)).changes > 0;
+  await db.withExclusiveTransactionAsync(async (txn) => {
+    if (deletedCaptureIds.has(capture.id)) return;
+    if (group && !group.savedAt) await writeGroup(txn, capture, group);
+    else if (group) {
+      const updated = await txn.runAsync('UPDATE text_groups SET analysis_json = ?, review_json = ? WHERE id = ? AND text = ?', JSON.stringify(analysis), JSON.stringify(review), group.id, text);
+      if (!updated.changes) return;
+    } else if (!await txn.getFirstAsync('SELECT id FROM captures WHERE id = ? AND corrected_text = ?', capture.id, text)) return;
+    saved = await writeWord(txn, capture, word, tokenIndex, text, group);
+  });
+  return saved;
 }
 
-/** An edit would collide with a different saved word. */
+/** 'added' or 'existing' (same language + lemma + reading already saved); null when the source or approval no longer holds. */
+export type WordSaveOutcome = 'added' | 'existing' | null;
+
+/** A user edit that would duplicate another saved word; nothing was changed. */
 export class WordConflictError extends Error {}
 
+/**
+ * Edits a saved word's written form, reading and personal meaning. The dictionary snapshot, chosen sense and
+ * source provenance stay as originally recorded. Another word with the same language + lemma + reading is a
+ * conflict, never merged or overwritten.
+ */
 export async function updateWordCard(id: string, change: { lemma: string; reading: string; personalMeaning: string }): Promise<void> {
   const lemma = change.lemma.normalize('NFC').trim();
   const reading = hiraganaReading(change.reading.normalize('NFC').trim());
@@ -410,18 +515,26 @@ export async function updateWordCard(id: string, change: { lemma: string; readin
   });
 }
 
-export async function updateSavedText(groupId: string, text: string, translation?: string): Promise<void> {
-  if (!text.trim()) throw new Error('A saved text cannot be empty.');
+/** Deletes one saved word; its text, photo and other words remain. Its practice card follows `options`. */
+export async function deleteWordCard(id: string, options: EntryDeletion = {}): Promise<void> {
   const db = await database();
   await db.withExclusiveTransactionAsync(async (txn) => {
-    // Readings and choices are cleared only when the wording changed (SET sees the old text).
-    const updated = await txn.runAsync(`UPDATE text_groups SET analysis_json = CASE WHEN text = ? THEN analysis_json END,
-      review_json = CASE WHEN text = ? THEN review_json ELSE '{}' END, text = ? WHERE id = ?`, text, text, text, groupId);
-    if (!updated.changes) throw new Error('This text was deleted.');
-    await txn.runAsync("UPDATE study_cards SET source_text = ? WHERE kind = 'sentence' AND group_id = ?", text, groupId);
-    // The user's own translation, kept apart from OCR, dictionary glosses and any future provider output.
-    if (translation !== undefined) await txn.runAsync("UPDATE study_cards SET personal_meaning = ? WHERE kind = 'sentence' AND group_id = ?", translation.trim() || null, groupId);
+    const entry = await txn.getFirstAsync<StudyCardRow>("SELECT * FROM study_cards WHERE id = ? AND kind = 'word'", id);
+    if (entry) await settlePracticeCards(txn, cardFromRow(entry), options);
+    await txn.runAsync("DELETE FROM study_cards WHERE id = ? AND kind = 'word'", id);
   });
+}
+
+/** CEO rule: deleting an entry either deletes its practice card or keeps it as an independent answer snapshot. */
+export type EntryDeletion = { keepPracticeCards?: boolean };
+
+async function settlePracticeCards(txn: SQLite.SQLiteDatabase, entry: StudyCard, { keepPracticeCards = false }: EntryDeletion): Promise<void> {
+  if (keepPracticeCards) {
+    // A kept card records its source photo too, so a later whole-photo delete still removes it (older rows had none).
+    await txn.runAsync('UPDATE practice_cards SET entry_id = NULL, answer_json = ?, capture_id = ? WHERE entry_id = ?', JSON.stringify(practiceAnswer(entry)), entry.captureId, entry.id);
+  } else {
+    await txn.runAsync('DELETE FROM practice_cards WHERE entry_id = ?', entry.id);
+  }
 }
 
 /** An optional recall exercise; while linked it always shows its entry's current answer. */
@@ -479,70 +592,20 @@ export async function deletePracticeCard(id: string): Promise<void> {
   await db.runAsync('DELETE FROM practice_cards WHERE id = ?', id);
 }
 
-
-/** Deleting an entry can retain its practice as an independent current-answer snapshot. */
-export type EntryDeletion = { keepPracticeCards?: boolean };
-
-async function settlePracticeCards(txn: SQLite.SQLiteDatabase, entry: StudyCard, { keepPracticeCards = false }: EntryDeletion): Promise<void> {
-  if (keepPracticeCards) {
-    // A kept card records its source photo too, so a later whole-photo delete still removes it (older rows had none).
-    await txn.runAsync('UPDATE practice_cards SET entry_id = NULL, answer_json = ?, capture_id = ? WHERE entry_id = ?', JSON.stringify(practiceAnswer(entry)), entry.captureId, entry.id);
-  } else {
-    await txn.runAsync('DELETE FROM practice_cards WHERE entry_id = ?', entry.id);
-  }
-}
-
-export async function deleteWordCard(id: string, options: EntryDeletion = {}): Promise<void> {
+/**
+ * Replaces a saved text's wording. Its stored readings and dictionary choices no longer match, so they are cleared
+ * for reanalysis. Raw OCR, the photo, source bounds and independently recorded words are untouched.
+ */
+export async function updateSavedText(groupId: string, text: string, translation?: string): Promise<void> {
+  if (!text.trim()) throw new Error('A saved text cannot be empty.');
   const db = await database();
   await db.withExclusiveTransactionAsync(async (txn) => {
-    const entry = await txn.getFirstAsync<StudyCardRow>("SELECT * FROM study_cards WHERE id = ? AND kind = 'word'", id);
-    if (entry) await settlePracticeCards(txn, cardFromRow(entry), options);
-    await txn.runAsync("DELETE FROM study_cards WHERE id = ? AND kind = 'word'", id);
+    // Readings and choices are cleared only when the wording changed (SET sees the old text).
+    const updated = await txn.runAsync(`UPDATE text_groups SET analysis_json = CASE WHEN text = ? THEN analysis_json END,
+      review_json = CASE WHEN text = ? THEN review_json ELSE '{}' END, text = ? WHERE id = ?`, text, text, text, groupId);
+    if (!updated.changes) throw new Error('This text was deleted.');
+    await txn.runAsync("UPDATE study_cards SET source_text = ? WHERE kind = 'sentence' AND group_id = ?", text, groupId);
+    // The user's own translation, kept apart from OCR, dictionary glosses and any future provider output.
+    if (translation !== undefined) await txn.runAsync("UPDATE study_cards SET personal_meaning = ? WHERE kind = 'sentence' AND group_id = ?", translation.trim() || null, groupId);
   });
-}
-
-export async function deleteTextGroup(id: string, options: EntryDeletion = {}): Promise<void> {
-  const db = await database();
-  await db.withExclusiveTransactionAsync(async (txn) => {
-    const entry = await txn.getFirstAsync<StudyCardRow>("SELECT * FROM study_cards WHERE kind = 'sentence' AND group_id = ?", id);
-    if (entry) await settlePracticeCards(txn, cardFromRow(entry), options);
-    await txn.runAsync("UPDATE study_cards SET group_id = NULL WHERE kind = 'word' AND group_id = ?", id);
-    await txn.runAsync("DELETE FROM study_cards WHERE kind = 'sentence' AND group_id = ?", id);
-    if (id.startsWith('legacy:')) await txn.runAsync('UPDATE captures SET saved_at = NULL WHERE id = ?', id.slice('legacy:'.length));
-    await txn.runAsync('DELETE FROM text_groups WHERE id = ?', id);
-  });
-}
-
-
-export async function loadOcrReviewCaptures(): Promise<CaptureRecord[]> {
-  const db = await database();
-  const rows = await db.getAllAsync<CaptureRow>('SELECT * FROM captures ORDER BY created_at DESC');
-  const saved = new Map((await db.getAllAsync<{ id: string; text: string }>('SELECT id, text FROM text_groups')).map((group) => [group.id, group.text]));
-  return rows.map(captureFromRow).filter((capture) => capture.status !== 'complete'
-    || !rowGroupsForCapture(capture).length || unsavedRows(capture, saved).length > 0);
-}
-
-export async function deleteCapture(id: string): Promise<boolean> {
-  try {
-    const db = await database();
-    const row = await db.getFirstAsync<CaptureRow>('SELECT * FROM captures WHERE id = ?', id);
-    if (row) {
-      const capturesDirectory = new Directory(Paths.document, 'captures');
-      const capturesPrefix = `${capturesDirectory.uri.replace(/\/$/, '')}/`;
-      if (row.image_uri.startsWith(capturesPrefix)) {
-        const file = new File(row.image_uri);
-        if (file.exists) file.delete();
-      }
-    }
-    await db.withExclusiveTransactionAsync(async (txn) => {
-      // Separate connection, foreign keys OFF: every dependent row is removed explicitly.
-      await txn.runAsync('DELETE FROM practice_cards WHERE capture_id = ? OR entry_id IN (SELECT id FROM study_cards WHERE capture_id = ?)', id, id);
-      await txn.runAsync('DELETE FROM study_cards WHERE capture_id = ?', id);
-      await txn.runAsync('DELETE FROM text_groups WHERE capture_id = ?', id);
-      await txn.runAsync('DELETE FROM captures WHERE id = ?', id);
-    });
-    return true;
-  } catch (error) {
-    throw error;
-  }
 }

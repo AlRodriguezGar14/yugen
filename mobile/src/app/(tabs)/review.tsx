@@ -3,6 +3,7 @@ import { router, useFocusEffect } from 'expo-router';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { ActivityIndicator, Alert, Image, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 import { deleteCapture, loadOcrReviewCaptures } from '../../capture/store';
+import { afterCommit } from '../../capture/studyChanges';
 import type { CaptureRecord } from '../../capture/types';
 import { colors } from '../../theme';
 
@@ -45,7 +46,7 @@ export default function OcrReviewScreen() {
         text: 'Delete photo and its records',
         style: 'destructive',
         onPress: () => {
-          void deleteCapture(capture.id)
+          void afterCommit(deleteCapture(capture.id))
             .then(() => {
               setCaptures((current) => current.filter((item) => item.id !== capture.id));
             })

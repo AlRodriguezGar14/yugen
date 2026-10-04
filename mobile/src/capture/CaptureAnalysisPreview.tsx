@@ -1,9 +1,20 @@
 import { useEffect, useRef, useState } from 'react';
 import { ActivityIndicator, Pressable, Text, View } from 'react-native';
 import { alignAnalysisTokensToText, hiraganaReading, isContentToken, wordDisplayForToken, tokenMeaningForDisplay, requestJapaneseAnalysis } from './analysis';
-import type { AnalysisResponse, KanjiDetail } from './types';
+import { AI_TRANSLATION_ENABLED, contextualMeaningForToken } from './translation';
+import type { AnalysisResponse, SentenceTranslation, KanjiDetail } from './types';
 import { colors } from '../theme';
 import { styles } from './uiStyles';
+
+/** The caller's actual outcome of saving one word; shown beside that word. */
+export type WordSaveResult = { state: 'saved' | 'failed'; message: string };
+/** The visible message for a store outcome: new, already saved, or not saved because the source/approval changed. */
+export function wordSaveResultFor(outcome: 'added' | 'existing' | null): WordSaveResult {
+  if (outcome === 'added') return { state: 'saved', message: 'Saved in Vocabulary.' };
+  if (outcome === 'existing') return { state: 'saved', message: 'Already in your Vocabulary.' };
+  return { state: 'failed', message: 'Not saved: this text or its dictionary choice changed. Check it and try again.' };
+}
+type WordStatus = { state: 'saved' | 'failed' | 'needs-choice'; message: string };
 
 export default function AnalysisReadingsAndMeanings({
   text,
@@ -16,17 +27,25 @@ export default function AnalysisReadingsAndMeanings({
   onSaveWord,
   onEnrichCharacters,
   showHeading = false,
+  translation,
+  translationBusy,
+  translationError,
+  onTranslate,
 }: {
   text: string;
   analysis: AnalysisResponse | null;
   busy: boolean;
   error: string | null;
   choices: Record<number, string>;
+  translation: SentenceTranslation | null;
+  translationBusy: boolean;
+  translationError: string | null;
+  onTranslate: () => void;
   onChooseCandidate: (index: number, id: string) => void;
   onRetry: () => void;
   showHeading?: boolean;
-  /** Saves one approved word; ambiguous words need a chosen sense first. */
-  onSaveWord?: (index: number) => void;
+  /** Saves one word and resolves with its real result; this view shows it beside that word. */
+  onSaveWord?: (index: number) => Promise<WordSaveResult>;
   onEnrichCharacters?: (index: number, details: KanjiDetail[]) => void;
 }) {
   const currentText = useRef<string | null>(text);
@@ -38,6 +57,62 @@ export default function AnalysisReadingsAndMeanings({
   const [expandedCharacters, setExpandedCharacters] = useState<Set<number>>(() => new Set());
   const [characterDetails, setCharacterDetails] = useState<Record<string, KanjiDetail[]>>({});
   const [characterError, setCharacterError] = useState<string | null>(null);
+  const [showTranslation, setShowTranslation] = useState(false);
+  // Per-word Save feedback keyed by exact text, token and chosen sense: a changed source or choice never keeps a stale result.
+  const [wordStatus, setWordStatus] = useState<Record<string, WordStatus>>({});
+  // A save in flight belongs to the word (token index), so it stays visible and locked even if its choice changes;
+  // the ref also blocks a second tap before the next render.
+  const savingWords = useRef(new Set<number>());
+  const [inFlight, setInFlight] = useState<Record<number, true>>({});
+  const statusKey = (index: number) => `${text}\n${index}\n${choices[index] ?? ''}`;
+
+  async function saveWord(index: number) {
+    const token = analysis?.tokens[index];
+    if (!onSaveWord || !token || savingWords.current.has(index)) return;
+    const key = statusKey(index);
+    const eligible = token.dictionaryCandidates.filter((candidate) => candidate.reading.trim() && candidate.meanings.some((meaning) => meaning.trim()));
+    if (eligible.length > 1 && !choices[index]) {
+      setWordStatus((current) => ({ ...current, [key]: { state: 'needs-choice', message: 'Choose one reading and meaning above, then tap Save word.' } }));
+      return;
+    }
+    savingWords.current.add(index);
+    setInFlight((current) => ({ ...current, [index]: true }));
+    let result: WordSaveResult;
+    try {
+      result = await onSaveWord(index);
+    } catch {
+      result = { state: 'failed', message: 'Could not save. Try again.' };
+    } finally {
+      savingWords.current.delete(index);
+      setInFlight((current) => { const next = { ...current }; delete next[index]; return next; });
+    }
+    // Recorded under the identity it was saved with: a changed text or choice never shows this result.
+    setWordStatus((current) => ({ ...current, [key]: result }));
+  }
+  const translationPanel = AI_TRANSLATION_ENABLED ? (
+    <>
+      <Pressable accessibilityRole="button" accessibilityState={{ expanded: showTranslation }} onPress={() => setShowTranslation((value) => !value)} style={styles.disclosureButton}>
+        <Text style={styles.disclosureText}>Optional AI translation</Text>
+        <Text style={styles.disclosureChevron}>{showTranslation ? '−' : '+'}</Text>
+      </Pressable>
+      {showTranslation && (
+        <View style={styles.sentenceTranslation}>
+          <Text style={styles.translationHeading}>OPENAI · SENTENCE + WORDS</Text>
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel={translation ? 'Translate the whole selected sentence again' : 'Translate the whole selected sentence'}
+            disabled={translationBusy || !text.trim()}
+            onPress={onTranslate}
+            style={({ pressed }) => [styles.translationButton, pressed && styles.previewRetryPressed, (translationBusy || !text.trim()) && styles.disabled]}
+          >
+            {translationBusy ? <ActivityIndicator size="small" color={colors.green} /> : <Text style={styles.translationButtonText}>{translation ? 'Translate again' : 'Translate sentence + words'}</Text>}
+          </Pressable>
+          <Text style={styles.translationPrivacy}>Sends corrected text and local word surfaces—not the photo or raw OCR—to OpenAI when tapped; usage may be billed.</Text>
+          {translationError && <Text accessibilityLiveRegion="polite" style={styles.translationError}>{translationError}</Text>}
+        </View>
+      )}
+    </>
+  ) : null;
   if (!analysis) {
     return (
       <>
@@ -61,6 +136,13 @@ export default function AnalysisReadingsAndMeanings({
             <Text accessibilityLiveRegion="polite" style={styles.previewStatusText}>Checking local readings and dictionary entries…</Text>
           </View>
         ) : <Text style={styles.previewStatusText}>Local readings are not available yet.</Text>}
+        {AI_TRANSLATION_ENABLED && translation && (
+          <View style={styles.sentenceTranslation}>
+            <Text style={styles.translationHeading}>SENTENCE TRANSLATION · AI</Text>
+            <Text selectable style={styles.translationText}>{translation.text}</Text>
+          </View>
+        )}
+        {translationPanel}
       </>
     );
   }
@@ -76,12 +158,23 @@ export default function AnalysisReadingsAndMeanings({
       {!onlyWord && furiganaText(text, analysis, choices)}
       {errorPanel}
       {busy && <ActivityIndicator color={colors.ink} />}
+      {AI_TRANSLATION_ENABLED && translation && (
+        <View style={styles.sentenceTranslation}>
+          <Text style={styles.translationHeading}>SENTENCE TRANSLATION · AI</Text>
+          <Text selectable style={styles.translationText}>{translation.text}</Text>
+        </View>
+      )}
       <View style={styles.previewMeanings}>
         {showHeading && <Text style={styles.previewMeaningHeading}>WORDS &amp; MEANINGS</Text>}
         {words.map(({ token, index }) => {
           const selectedId = choices[index] ?? null;
           const word = wordDisplayForToken(token, selectedId);
+          const status = wordStatus[`${text}\n${index}\n${choices[index] ?? ''}`];
+          const saving = !!inFlight[index];
+          const saveLocked = busy || saving || status?.state === 'saved';
+          const saveLabel = saving ? 'Saving…' : status?.state === 'saved' ? 'Saved ✓' : status?.state === 'failed' ? 'Retry save' : 'Save word';
           const meaning = tokenMeaningForDisplay(token, selectedId);
+          const contextualMeaning = AI_TRANSLATION_ENABLED ? contextualMeaningForToken(translation, text, index, token.surface) : null;
           return (
             <View key={`${index}:${token.surface}`} style={styles.previewMeaningRow}>
               <View style={styles.previewWordLine}>
@@ -91,6 +184,12 @@ export default function AnalysisReadingsAndMeanings({
                 </View>
               </View>
               {word.sourceSurface && <Text style={styles.furiganaNote}>In source · {word.sourceSurface} · {word.sourceReading ? hiraganaReading(word.sourceReading) : 'Reading unknown'}</Text>}
+              {contextualMeaning && (
+                <>
+                  <Text style={styles.contextMeaningLabel}>IN THIS SENTENCE · AI</Text>
+                  <Text style={styles.previewMeaning}>{contextualMeaning}</Text>
+                </>
+              )}
               {token.writtenFormEvidence && <Text style={styles.dictionaryLabel}>DICTIONARY ENTRY FOR THIS WRITTEN FORM · NOT PLACED IN CONTEXT</Text>}
               {token.dictionaryCandidates.length > 1 ? (
                 <>
@@ -139,14 +238,17 @@ export default function AnalysisReadingsAndMeanings({
                   ))}
                 </>
               ) : (
-                <Text style={styles.previewUnknown}>Unknown · no dictionary entry</Text>
+                <Text style={styles.previewUnknown}>{contextualMeaning ? 'No local dictionary entry' : 'Unknown · no dictionary entry'}</Text>
               )}
               {/* Only a word with an approvable dictionary entry or curated meaning can be saved; character evidence cannot. */}
               {onSaveWord && savable(token) && (
-                <Pressable accessibilityRole="button" accessibilityLabel={`Save word ${token.surface}`} disabled={busy}
-                  onPress={() => onSaveWord(index)} style={[styles.wordSave, busy && styles.disabled]}>
-                  <Text style={styles.wordSaveText}>Save word</Text>
+                <Pressable accessibilityRole="button" accessibilityLabel={`${saveLabel === 'Saving…' ? 'Saving' : saveLabel} ${token.surface}`} accessibilityState={{ disabled: saveLocked, busy: saving }}
+                  disabled={saveLocked} onPress={() => void saveWord(index)} style={[styles.wordSave, saveLocked && styles.disabled]}>
+                  <Text style={styles.wordSaveText}>{saveLabel}</Text>
                 </Pressable>
+              )}
+              {onSaveWord && status && !saving && (
+                <Text accessibilityLiveRegion="polite" style={status.state === 'saved' ? styles.wordSaveSuccess : styles.wordSaveNotice}>{status.message}</Text>
               )}
               {!!token.scriptUnits.length && (
                 <>
@@ -181,6 +283,7 @@ export default function AnalysisReadingsAndMeanings({
         {!words.length && <Text style={styles.previewStatusText}>No dictionary words were found in this text.</Text>}
         {showHeading && <Text style={styles.previewDisclaimer}>Local dictionary senses describe words; sentence context may leave several possible meanings.</Text>}
       </View>
+      {translationPanel}
     </>
   );
 }

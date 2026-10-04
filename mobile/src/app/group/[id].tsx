@@ -1,12 +1,13 @@
-import { useEffect, useRef, useState } from 'react';
-import { router, useLocalSearchParams } from 'expo-router';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { router, useFocusEffect, useLocalSearchParams } from 'expo-router';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { ActivityIndicator, Pressable, ScrollView, Text, View } from 'react-native';
 import { addWordCard, loadCaptureById, loadTextEntryForGroup, loadTextGroup, saveGroupAnalysisForText } from '../../capture/store';
 import { analysisFailureMessage, readingToSave, requestJapaneseAnalysis } from '../../capture/analysis';
 import type { CaptureRecord, TextGroup } from '../../capture/types';
-import AnalysisReadingsAndMeanings from '../../capture/CaptureAnalysisPreview';
+import AnalysisReadingsAndMeanings, { wordSaveResultFor } from '../../capture/CaptureAnalysisPreview';
 import SourcePhoto from '../../capture/SourcePhoto';
+import { afterCommit, onStudyChange } from '../../capture/studyChanges';
 import { styles } from '../../capture/uiStyles';
 
 export default function SavedGroupScreen() {
@@ -20,7 +21,11 @@ export default function SavedGroupScreen() {
   const [entryId, setEntryId] = useState<string | null>(null);
   const latestGroup = useRef<TextGroup | null>(null);
   const writes = useRef<Promise<void>>(Promise.resolve());
-  useEffect(() => {
+  const [version, setVersion] = useState(0);
+  // Its entry can be edited or deleted on the entry screen above it: reload on return and on committed changes,
+  // after any word write still in flight, so the persisted text (or its deletion) is shown.
+  useEffect(() => onStudyChange(() => setVersion((value) => value + 1)), []);
+  useFocusEffect(useCallback(() => {
     let active = true;
     writes.current.catch(() => {}).then(() => loadTextGroup(id)).then(async (record) => {
       const capture = record ? await loadCaptureById(record.captureId) : null;
@@ -28,7 +33,9 @@ export default function SavedGroupScreen() {
       if (active) { latestGroup.current = record; setGroup(record); setSource(capture); setEntryId(entry?.id ?? null); setBusy(false); }
     }).catch(() => { if (active) { setError('This text group could not be opened.'); setBusy(false); } });
     return () => { active = false; };
-  }, [id]);
+    // A committed change must re-run the load while this screen stays focused.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [id, version]));
   useEffect(() => {
     const currentGroup = latestGroup.current;
     if (!currentGroup || (currentGroup.analysis?.normalizedText === currentGroup.text && attempt === 0)) return;
@@ -78,13 +85,13 @@ export default function SavedGroupScreen() {
                 onSaveWord={async (index) => {
                   const token = group.analysis?.tokens[index];
                   const reading = token ? readingToSave(token, group.analysisReview[index]?.dictionaryCandidateId) : null;
-                  if (!token || !reading) return;
+                  if (!token || !reading) return { state: 'failed', message: 'This word has no dictionary reading to save.' };
                   // Waits for pending choice writes, so the saved word uses the sense shown.
                   await writes.current.catch(() => {});
-                  await addWordCard(source, index, reading, group);
+                  return wordSaveResultFor(await afterCommit(addWordCard(source, index, reading, group)));
                 }}
                 onEnrichCharacters={(index, details) => { const current = latestGroup.current; if (current?.analysis) updateStudy({ ...current, analysis: { ...current.analysis, tokens: current.analysis.tokens.map((token, position) => position === index ? { ...token, kanjiDetails: details } : token) } }); }}
-                showHeading />
+                translation={null} translationBusy={false} translationError={null} onTranslate={() => {}} showHeading />
               <Pressable accessibilityRole="button" accessibilityState={{ expanded: showPhoto }} onPress={() => setShowPhoto((value) => !value)} style={styles.disclosureButton}>
                 <Text style={styles.disclosureText}>{showPhoto ? 'Hide photo' : 'Show in photo'}</Text>
               </Pressable>

@@ -1,4 +1,4 @@
-import type { CaptureRecord, CaptureRegion, TextGroup } from './types';
+import type { AnalysisTokenReview, CaptureRecord, CaptureRegion, TextGroup } from './types';
 
 /** Native blocks stay separate; joining kept findings is an explicit user action. */
 export function textGroupsForCapture(capture: CaptureRecord): TextGroup[] {
@@ -42,6 +42,17 @@ export function unsavedRows(capture: CaptureRecord, savedTexts: Map<string, stri
   const savedBlocks = textGroupsForCapture(capture).filter((group) => group.text.trim() && savedTexts.get(group.id) === group.text);
   return rowGroupsForCapture(capture).filter((row) => row.text.trim() && savedTexts.get(row.id) !== row.text
     && !savedBlocks.some((group) => row.regionIds.length ? row.regionIds.every((id) => group.regionIds.includes(id)) : group.text === row.text));
+}
+
+/** Library label for a source photo: reading, unread, draft, or its saved/unsaved/word counts. */
+export function photoSummary(capture: CaptureRecord, savedTexts: Map<string, string>, words: number): string {
+  if (capture.status === 'processing' || capture.status === 'selecting') return 'PHOTO KEPT · TEXT NOT READ YET';
+  if (capture.status === 'failed') return 'PHOTO KEPT · TEXT NOT READ · OPEN TO RETRY';
+  const texts = [...savedTexts.keys()].filter((id) => id.startsWith(`group:${capture.id}:`) || id === `legacy:${capture.id}`).length;
+  const unsaved = unsavedRows(capture, savedTexts).length;
+  const rows = `${unsaved} ${unsaved === 1 ? 'ROW' : 'ROWS'} NOT SAVED`;
+  if (!texts) return unsaved ? `DRAFT · ${rows}` : 'DRAFT · NO TEXT FOUND';
+  return `${texts} SAVED · ${rows} · ${words} ${words === 1 ? 'WORD' : 'WORDS'}`;
 }
 
 /** Save feedback: where the text went, new vs already saved words, and which words still need the user. */
@@ -89,6 +100,20 @@ export function excludeRegions(capture: CaptureRecord, ids: Set<string>): Captur
   };
 }
 
+export function mergePersistedAnalysis(
+  capture: CaptureRecord,
+  persisted: CaptureRecord | null,
+): CaptureRecord {
+  if (!persisted || capture.correctedText !== persisted.correctedText) return capture;
+  return {
+    ...capture,
+    savedAt: capture.savedAt ?? persisted.savedAt,
+    analysis: capture.analysis ?? persisted.analysis,
+    analysisReview: persisted.analysis ? persisted.analysisReview : capture.analysisReview,
+    sentenceTranslation: persisted.sentenceTranslation ?? capture.sentenceTranslation,
+  };
+}
+
 export function updateManualCorrection(capture: CaptureRecord, correctedText: string): CaptureRecord {
   return {
     ...capture,
@@ -102,6 +127,19 @@ export function updateManualCorrection(capture: CaptureRecord, correctedText: st
 
 export function markCaptureOcrFailed(capture: CaptureRecord): CaptureRecord {
   return { ...capture, status: 'failed' };
+}
+
+export function updateAnalysisTokenReview(
+  capture: CaptureRecord,
+  tokenIndex: number,
+  change: Partial<AnalysisTokenReview>,
+): CaptureRecord {
+  const key = String(tokenIndex);
+  const current = capture.analysisReview[key] ?? { ignored: false, dictionaryCandidateId: null };
+  return {
+    ...capture,
+    analysisReview: { ...capture.analysisReview, [key]: { ...current, ...change } },
+  };
 }
 
 export function hydrateCaptureReview(capture: CaptureRecord): CaptureRecord {
@@ -177,6 +215,44 @@ export function updateRegionCorrection(capture: CaptureRecord, regionId: string,
   };
 }
 
+export function joinSelectedFindings(capture: CaptureRecord, joinedWithoutBreaks: boolean, regionIds?: Set<string>): CaptureRecord {
+  if (regionIds) {
+    const regions = capture.regions.map((region) => regionIds.has(region.id)
+      ? { ...region, review: { ...region.review, joined: joinedWithoutBreaks } } : region);
+    return { ...capture, regions, analysis: null, analysisReview: {}, sentenceTranslation: null };
+  }
+  const selectedCount = capture.regions.filter((region) => region.review?.selected && !region.review.excluded).length;
+  if (selectedCount < 2) return capture;
+  return {
+    ...capture,
+    joinedWithoutBreaks,
+    correctedText: selectionText(capture.regions, joinedWithoutBreaks),
+    sentenceTranslation: null,
+    analysis: null,
+    analysisReview: {},
+  };
+}
+
+export function excludeRegion(capture: CaptureRecord, regionId: string): CaptureRecord {
+  const target = capture.regions.find((region) => region.id === regionId);
+  if (!target) return capture;
+
+  const regions = capture.regions.map((region) => region.id === regionId
+    ? { ...region, review: { ...region.review, selected: false, excluded: true } }
+    : region);
+  const selectedRegionId = regions.find((region) => region.review?.selected)?.id ?? null;
+
+  return {
+    ...capture,
+    regions,
+    selectedRegionId,
+    correctedText: target.review?.selected ? selectionText(regions, capture.joinedWithoutBreaks) : capture.correctedText,
+    sentenceTranslation: target.review?.selected ? null : capture.sentenceTranslation,
+    analysis: target.review?.selected ? null : capture.analysis,
+    analysisReview: target.review?.selected ? {} : capture.analysisReview,
+  };
+}
+
 export function restoreRegion(capture: CaptureRecord, regionId: string): CaptureRecord {
   if (!capture.regions.some((region) => region.id === regionId && region.review?.excluded)) return capture;
   const regions = capture.regions.map((region) => region.id === regionId
@@ -188,14 +264,4 @@ export function restoreRegion(capture: CaptureRecord, regionId: string): Capture
     correctedText: selectionText(regions, capture.joinedWithoutBreaks),
     sentenceTranslation: null, analysis: null, analysisReview: {},
   };
-}
-
-export function photoSummary(capture: CaptureRecord, savedTexts: Map<string, string>, words: number): string {
-  if (capture.status === 'processing' || capture.status === 'selecting') return 'PHOTO KEPT · TEXT NOT READ YET';
-  if (capture.status === 'failed') return 'PHOTO KEPT · TEXT NOT READ · OPEN TO RETRY';
-  const texts = [...savedTexts.keys()].filter((id) => id.startsWith(`group:${capture.id}:`) || id === `legacy:${capture.id}`).length;
-  const unsaved = unsavedRows(capture, savedTexts).length;
-  const rows = `${unsaved} ${unsaved === 1 ? 'ROW' : 'ROWS'} NOT SAVED`;
-  if (!texts) return unsaved ? `DRAFT · ${rows}` : 'DRAFT · NO TEXT FOUND';
-  return `${texts} SAVED · ${rows} · ${words} ${words === 1 ? 'WORD' : 'WORDS'}`;
 }

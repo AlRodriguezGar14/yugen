@@ -35,7 +35,7 @@ export function analysisFailureMessage(error: unknown): string {
   const safeSuffix = 'Your OCR text is still safe.';
 
   if (message === 'Local Japanese analysis is not configured.') {
-    return `Local readings are not configured. Set EXPO_PUBLIC_ANALYSIS_BASE_URL to the analysis service on your Mac, then restart Metro. ${safeSuffix}`;
+    return `Local readings are not configured. Restart with pnpm --dir mobile start:dev-client. ${safeSuffix}`;
   }
   if (NETWORK_FAILURE.test(message)) {
     return `Can't reach the local readings service at ${analysisBaseUrl() ?? 'the configured address'}. Keep it running on your Mac with the phone on the same Wi-Fi, then retry. ${safeSuffix}`;

@@ -10,6 +10,7 @@ export const colors = {
   white: '#FFFFFF',
 };
 
+/** Bottom navigation style; a screen restores it after hiding the bar with `display: 'none'`. */
 export function tabBarStyle(bottomInset: number) {
   // Custom icon/label sizes need more than UIKit's default 49pt, plus the home indicator.
   return { backgroundColor: colors.card, borderTopColor: colors.ink, borderTopWidth: 2, height: 64 + bottomInset };

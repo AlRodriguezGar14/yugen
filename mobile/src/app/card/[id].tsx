@@ -1,34 +1,52 @@
-import { useEffect, useState } from 'react';
-import { router, useLocalSearchParams } from 'expo-router';
+import { useCallback, useEffect, useState } from 'react';
+import { router, useFocusEffect, useLocalSearchParams } from 'expo-router';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import { ActivityIndicator, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
-import { deleteTextGroup, deleteWordCard, createPracticeCard, loadPracticeCardForEntry, EntryDeletedError, type PracticeCard, enrichWordCardCharacters, loadCaptureById, loadStudyCard, loadTextGroup, saveAnalysisForText, saveGroupAnalysisForText, updateWordCard, updateSavedText, WordConflictError, type StudyCard } from '../../capture/store';
+import { ActivityIndicator, KeyboardAvoidingView, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
+import { addWordCard, createPracticeCard, deleteTextGroup, deleteWordCard, enrichWordCardCharacters, loadCaptureById, loadPracticeCardForEntry, loadStudyCard, loadTextGroup, saveAnalysisForText, saveGroupAnalysisForText, updateSavedText, updateWordCard, WordConflictError, EntryDeletedError, type PracticeCard, type StudyCard } from '../../capture/store';
 import { confirmEntryDeletion } from '../../capture/entryActions';
-import { requestJapaneseAnalysis, analysisFailureMessage } from '../../capture/analysis';
+import StatusMessage from '../../capture/StatusMessage';
+import { afterCommit, onStudyChange } from '../../capture/studyChanges';
+import { requestJapaneseAnalysis, analysisFailureMessage, readingToSave } from '../../capture/analysis';
 import { studyDataForCard } from '../../capture/studyCards';
-import { analysisRequestFor, type CaptureRecord } from '../../capture/types';
-import AnalysisReadingsAndMeanings from '../../capture/CaptureAnalysisPreview';
+import { analysisRequestFor, type CaptureRecord, type TextGroup } from '../../capture/types';
+import AnalysisReadingsAndMeanings, { wordSaveResultFor, type WordSaveResult } from '../../capture/CaptureAnalysisPreview';
 import SourcePhoto from '../../capture/SourcePhoto';
 import { colors } from '../../theme';
 
 export default function StudyCardScreen() {
-  const { id } = useLocalSearchParams<{ id: string }>();
+  const { id, mode } = useLocalSearchParams<{ id: string; mode?: string }>();
   const [card, setCard] = useState<StudyCard | null>(null);
   const [capture, setCapture] = useState<CaptureRecord | null>(null);
-  const [revealed, setRevealed] = useState(true);
+  const [revealed, setRevealed] = useState(mode === 'dictionary');
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [attempt, setAttempt] = useState(0);
   const [analysisBusy, setAnalysisBusy] = useState(false);
   const [regionIds, setRegionIds] = useState<string[]>([]);
   const [showPhoto, setShowPhoto] = useState(false);
-  const [reload, setReload] = useState(0);
   const [draft, setDraft] = useState<{ text: string; lemma: string; reading: string; meaning: string } | null>(null);
   const [pending, setPending] = useState<'saving' | 'deleting' | null>(null);
   const [status, setStatus] = useState<{ text: string; error: boolean } | null>(null);
+  const [reload, setReload] = useState(0);
   const [deleted, setDeleted] = useState<string | null>(null);
   const [practice, setPractice] = useState<PracticeCard | null>(null);
   const [creatingPractice, setCreatingPractice] = useState(false);
+  const [practiceVersion, setPracticeVersion] = useState(0);
+  const [savedGroup, setSavedGroup] = useState<TextGroup | null>(null);
+  // In-place dictionary choices belong to one entry and its exact text; any other entry or wording drops them.
+  const [entryChoices, setEntryChoices] = useState<{ scope: string; choices: Record<number, string> }>({ scope: '', choices: {} });
+  // The practice card can be deleted on its own screen; refresh only that pointer on return or committed changes,
+  // leaving any unsaved draft and pending save untouched.
+  useEffect(() => onStudyChange(() => setPracticeVersion((value) => value + 1)), []);
+  const entryId = card?.id;
+  useFocusEffect(useCallback(() => {
+    if (!entryId) return undefined;
+    let active = true;
+    loadPracticeCardForEntry(entryId).then((linked) => { if (active) setPractice(linked); }).catch(() => {});
+    return () => { active = false; };
+    // A committed change must re-run the load while this screen stays focused.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [entryId, practiceVersion]));
   useEffect(() => {
     let active = true;
     loadStudyCard(id).then(async (savedCard) => {
@@ -38,7 +56,7 @@ export default function StudyCardScreen() {
       const context = source && savedCard ? { ...source, correctedText: savedCard.sourceText,
         analysis: group?.text === savedCard.sourceText ? group.analysis : source.analysis?.normalizedText === savedCard.sourceText ? source.analysis : null,
         analysisReview: group?.text === savedCard.sourceText ? group.analysisReview : source.analysisReview } : null;
-      if (active) { setCard(savedCard); setCapture(context); setRegionIds(group?.regionIds ?? []); setPractice(linkedPractice); setLoading(false); setPending(null); }
+      if (active) { setCard(savedCard); setCapture(context); setRegionIds(group?.regionIds ?? []); setSavedGroup(group); setPractice(linkedPractice); setLoading(false); setPending(null); }
     }).catch(() => { if (active) { setError('This card could not be opened. Your Library remains saved.'); setLoading(false); setPending(null); } });
     return () => { active = false; };
   }, [id, reload]);
@@ -60,7 +78,19 @@ export default function StudyCardScreen() {
     });
     return () => { active = false; };
   }, [revealed, capture, card?.sourceText, card?.groupId, card?.wordSnapshot, attempt]);
-  const { analysis, choices } = card && capture ? studyDataForCard(card, capture) : { analysis: null, choices: {} };
+  const { analysis, choices: storedChoices } = card && capture ? studyDataForCard(card, capture) : { analysis: null, choices: {} };
+  const choiceScope = card ? `${card.id}\n${card.sourceText}` : '';
+  const choices: Record<number, string> = { ...storedChoices, ...(entryChoices.scope === choiceScope ? entryChoices.choices : {}) };
+
+  /** A saved text records its words directly, through its saved group's source guard (same text required). */
+  async function saveEntryWord(index: number): Promise<WordSaveResult> {
+    const token = analysis?.tokens[index];
+    const reading = token ? readingToSave(token, choices[index]) : null;
+    if (!capture || !savedGroup || !analysis || !token || !reading) return { state: 'failed', message: 'This word has no dictionary reading to save.' };
+    const review = { ...savedGroup.analysisReview };
+    if (choices[index]) review[String(index)] = { ignored: review[String(index)]?.ignored ?? false, dictionaryCandidateId: choices[index] };
+    return wordSaveResultFor(await afterCommit(addWordCard(capture, index, reading, { ...savedGroup, analysis, analysisReview: review })));
+  }
   // A word whose saved text was removed still opens its photo and rows.
   const openSource = () => card?.groupId ? router.push({ pathname: '/group/[id]', params: { id: card.groupId } })
     : router.navigate({ pathname: '/(tabs)/capture', params: { captureId: card?.captureId, groupId: undefined, fresh: undefined } });
@@ -79,8 +109,8 @@ export default function StudyCardScreen() {
     setPending('saving');
     setStatus({ text: 'Saving changes…', error: false });
     try {
-      if (card.kind === 'word') await updateWordCard(card.id, { lemma: draft.lemma, reading: draft.reading, personalMeaning: draft.meaning });
-      else await updateSavedText(card.groupId!, draft.text, draft.meaning);
+      if (card.kind === 'word') await afterCommit(updateWordCard(card.id, { lemma: draft.lemma, reading: draft.reading, personalMeaning: draft.meaning }));
+      else await afterCommit(updateSavedText(card.groupId!, draft.text, draft.meaning));
       setDraft(null);
       setStatus({ text: card.kind === 'word' ? 'Word saved.' : draft.text === card.sourceText ? 'Text saved.' : 'Text saved. Its readings are being checked again.', error: false });
       // Stays 'saving' until the reload publishes the persisted card, so a stale card cannot be edited again.
@@ -97,7 +127,7 @@ export default function StudyCardScreen() {
     confirmEntryDeletion(card.kind, !!practice, (options) => {
       setPending('deleting');
       setStatus({ text: 'Deleting…', error: false });
-      (word ? deleteWordCard(card.id, options) : deleteTextGroup(card.groupId!, options))
+      afterCommit(word ? deleteWordCard(card.id, options) : deleteTextGroup(card.groupId!, options))
         .then(() => {
           setStatus(null);
           const kept = practice && options.keepPracticeCards ? ' Its practice card was kept.' : practice ? ' Its practice card was deleted.' : '';
@@ -114,7 +144,7 @@ export default function StudyCardScreen() {
     setCreatingPractice(true);
     setStatus({ text: 'Creating practice card…', error: false });
     try {
-      setPractice(await createPracticeCard(card.id));
+      setPractice(await afterCommit(createPracticeCard(card.id)));
       setStatus({ text: 'Practice card created. Find it under Practice in your Library.', error: false });
     } catch (cause) {
       setStatus({ text: cause instanceof EntryDeletedError ? cause.message : 'The practice card could not be created. Try again.', error: true });
@@ -126,15 +156,26 @@ export default function StudyCardScreen() {
         <Pressable accessibilityRole="button" onPress={() => router.back()} style={styles.action}><Text style={styles.actionText}>‹ Library</Text></Pressable>
         <Text style={styles.title}>{card?.kind === 'word' ? 'Word entry' : card?.kind === 'sentence' ? 'Text entry' : 'Saved entry'}</Text>
       </View>
-      <ScrollView contentContainerStyle={styles.content}>
-        {deleted ? <Text accessibilityLiveRegion="polite" style={styles.body}>{deleted}</Text> : loading ? <ActivityIndicator /> : !card || !capture ? <Text style={styles.body}>{error ?? 'This card or its original source was deleted.'}</Text> : (
+      {/* The editor sits under the entry header; keyboard insets keep Save/Cancel reachable on small screens. */}
+      <KeyboardAvoidingView style={styles.screen} behavior={Platform.OS === 'ios' ? 'padding' : 'height'}>
+      <ScrollView contentContainerStyle={styles.content} keyboardShouldPersistTaps="handled">
+        {deleted ? (
+          <>
+            <StatusMessage text={deleted} />
+            <Pressable accessibilityRole="button" onPress={() => router.back()} style={styles.action}><Text style={styles.actionText}>‹ Back to Library</Text></Pressable>
+          </>
+        ) : loading ? <ActivityIndicator /> : !card || !capture ? <Text style={styles.body}>{error ?? 'This card or its original source was deleted.'}</Text> : (
           <>
             <Text style={styles.label}>{card.kind === 'word' ? 'WORD' : 'TEXT'} · {revealed ? (card.kind === 'word' ? 'SAVED VOCABULARY' : 'SAVED TEXT') : 'RECALL FIRST'}</Text>
             {(!revealed || card.kind === 'sentence' || renamed) && <Text selectable style={styles.front}>{card.kind === 'word' ? card.lemma : card.sourceText}</Text>}
             {revealed && renamed && <Text style={styles.body}>Your reading · {card.reading}</Text>}
-            {revealed && card.kind === 'word' && card.personalMeaning && <Text style={styles.body}>Your meaning · {card.personalMeaning}</Text>}
-            {revealed && card.kind === 'sentence' && card.personalMeaning && <View style={styles.personal}><Text style={styles.label}>YOUR TRANSLATION · YOUR OWN WORDS, NOT A DICTIONARY OR AI TRANSLATION</Text><Text selectable style={styles.personalText}>{card.personalMeaning}</Text></View>}
-            {status && <Text accessibilityLiveRegion="polite" style={styles.body}>{status.text}</Text>}
+            {revealed && card.personalMeaning && (
+              <View style={styles.personal}>
+                <Text style={styles.label}>{card.kind === 'word' ? 'YOUR MEANING · NOT FROM THE DICTIONARY' : 'YOUR TRANSLATION · YOUR OWN WORDS, NOT A DICTIONARY OR AI TRANSLATION'}</Text>
+                <Text selectable style={styles.personalText}>{card.personalMeaning}</Text>
+              </View>
+            )}
+            <StatusMessage text={status?.text ?? null} error={status?.error} />
             {draft ? (
               <View style={styles.editor}>
                 {card.kind === 'word' ? (
@@ -188,14 +229,15 @@ export default function StudyCardScreen() {
             ) : capture.correctedText !== card.sourceText ? <Text style={styles.body}>This source was edited after the word card was created. Open the source to study its current text.</Text> : (
               <AnalysisReadingsAndMeanings key={`${card.id}\n${capture.correctedText}`} text={card.kind === 'word' ? recordedWord : capture.correctedText} analysis={analysis} busy={analysisBusy} error={error}
                 choices={choices}
-                onChooseCandidate={() => openSource()}
+                onChooseCandidate={(index, id) => card.kind === 'sentence' ? setEntryChoices((current) => ({ scope: choiceScope, choices: { ...(current.scope === choiceScope ? current.choices : {}), [index]: id } })) : openSource()}
+                onSaveWord={card.kind === 'sentence' && savedGroup ? saveEntryWord : undefined}
                 onEnrichCharacters={(_index, details) => {
                   if (!card.wordSnapshot) return;
                   const enriched = { ...card, wordSnapshot: { ...card.wordSnapshot, kanjiDetails: details } };
                   setCard(enriched);
                   void enrichWordCardCharacters(card.id, details).catch(() => setError('Character definitions are shown but could not be saved. Please retry.'));
                 }}
-                onRetry={() => setAttempt((value) => value + 1)} showHeading={!renamed} />
+                onRetry={() => setAttempt((value) => value + 1)} translation={null} translationBusy={false} translationError={null} onTranslate={() => {}} showHeading={!renamed} />
             )}
             {revealed && card.kind === 'word' && <Text style={styles.body}>In your text · {card.sourceText}</Text>}
             <Pressable accessibilityRole="button" accessibilityState={{ expanded: showPhoto }} onPress={() => setShowPhoto((value) => !value)} style={styles.action}>
@@ -208,6 +250,7 @@ export default function StudyCardScreen() {
           </>
         )}
       </ScrollView>
+      </KeyboardAvoidingView>
     </SafeAreaView>
   );
 }

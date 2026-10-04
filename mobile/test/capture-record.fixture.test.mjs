@@ -3,8 +3,9 @@ import { readFile } from 'node:fs/promises';
 import test from 'node:test';
 import { alignAnalysisTokensToText, analysisFailureMessage, hiraganaReading, isContentToken, isLocalAnalysisUrl, parseAnalysisResponse, wordDisplayForToken, readingForDisplay, safeDictionaryMeaning, tokenMeaningForDisplay } from '../src/capture/analysis.ts';
 import { captureFromRow, captureToRow } from '../src/capture/types.ts';
+import { contextualMeaningForToken, parseSentenceTranslation, sentenceTranslationFailureMessage, TRANSLATION_CONTRACT_VERSION } from '../src/capture/translation.ts';
 import { brushTouchesBounds, cropBoundsFromDrag, cropBoundsToPixels, mapCropBoundsToImage, normalizeBounds } from '../src/capture/geometry.ts';
-import { excludeRegions, hydrateCaptureReview, markCaptureOcrFailed, restoreRegion, selectRecognizedFindings, selectSingleRegion, toggleRegionSelection, updateManualCorrection, updateRegionCorrection } from '../src/capture/review.ts';
+import { textGroupsForCapture, excludeRegion, excludeRegions, selectRecognizedFindings, hydrateCaptureReview, joinSelectedFindings, markCaptureOcrFailed, mergePersistedAnalysis, restoreRegion, toggleRegionSelection, updateAnalysisTokenReview, updateManualCorrection, updateRegionCorrection } from '../src/capture/review.ts';
 
 const fixture = JSON.parse(
   await readFile(new URL('../fixtures/capture-record.json', import.meta.url), 'utf8'),
@@ -41,6 +42,44 @@ test('sentence translation stays separate from source text and is invalidated af
   const staleRow = captureToRow(translated);
   staleRow.corrected_text = '鶏肉をお願いします。';
   assert.equal(captureFromRow(staleRow).sentenceTranslation, null);
+});
+
+test('sentence translation accepts only a matching source and language pair', () => {
+  const request = {
+    contractVersion: TRANSLATION_CONTRACT_VERSION,
+    sourceLanguage: 'ja',
+    targetLanguage: 'en',
+    text: fixture.correctedText,
+    words: [{ tokenIndex: 0, surface: '鶏肉' }, { tokenIndex: 2, surface: 'ください' }],
+  };
+  const response = {
+    ...request,
+    sourceText: fixture.correctedText,
+    translation: 'Please give me chicken.',
+    wordMeanings: [
+      { tokenIndex: 0, surface: '鶏肉', text: 'chicken meat' },
+      { tokenIndex: 2, surface: 'ください', text: 'please give me' },
+    ],
+  };
+
+  assert.deepStrictEqual(parseSentenceTranslation(response, request), response);
+  assert.throws(() => parseSentenceTranslation({ ...response, sourceText: '米国' }, request), /Your text was not changed/);
+  assert.throws(() => parseSentenceTranslation({ ...response, translation: '  ' }, request), /incompatible result/);
+  assert.throws(() => parseSentenceTranslation({ ...response, wordMeanings: [{ ...response.wordMeanings[0], surface: '米' }, response.wordMeanings[1]] }, request), /incompatible result/);
+  assert.match(sentenceTranslationFailureMessage(new Error('Translation service returned 503.')), /OPENAI_API_KEY/i);
+});
+
+test('contextual word meanings match both the exact sentence and token identity', () => {
+  const translation = {
+    sourceText: '米を使う。',
+    targetLanguage: 'en',
+    text: 'Use rice.',
+    wordMeanings: [{ tokenIndex: 0, surface: '米', text: 'rice' }],
+  };
+
+  assert.equal(contextualMeaningForToken(translation, '米を使う。', 0, '米'), 'rice');
+  assert.equal(contextualMeaningForToken(translation, '米を使う。', 2, '使う'), null);
+  assert.equal(contextualMeaningForToken(translation, '別の文。', 0, '米'), null);
 });
 
 test('OCR failure marks the capture recoverable without dropping source or prior text', () => {
@@ -154,6 +193,77 @@ test('analysis keeps curated term meanings separate from dictionary senses', () 
   );
 });
 
+test('choosing 米 rice links the furigana and meaning and persists the same candidate', () => {
+  const token = {
+    ...fixture.analysis.tokens[0],
+    surface: '米',
+    lemma: '米',
+    reading: 'べい',
+    dictionaryCandidates: [
+      { id: '1508750:こめ', reading: 'こめ', meanings: ['(husked grains of) rice'], recommended: true },
+      { id: '2150610:べい', reading: 'べい', meanings: ['(United States of) America'], recommended: false },
+    ],
+    scriptUnits: ['米'],
+  };
+  const analysis = { ...fixture.analysis, normalizedText: '米', tokens: [token] };
+  const capture = { ...fixture, correctedText: '米', analysis };
+  const candidateId = '1508750:こめ';
+
+  assert.equal(readingForDisplay({
+    ...token,
+    dictionaryCandidates: token.dictionaryCandidates.map((candidate) => ({ ...candidate, recommended: false })),
+  }, null), 'べい');
+  assert.equal(readingForDisplay(token, null), 'べい');
+  assert.deepStrictEqual(tokenMeaningForDisplay(token, null), {
+    text: '(husked grains of) rice',
+    source: 'JMdict',
+  });
+  const restored = captureFromRow(captureToRow(updateAnalysisTokenReview(capture, 0, { dictionaryCandidateId: candidateId })));
+  const selected = restored.analysisReview['0'].dictionaryCandidateId;
+  assert.equal(readingForDisplay(restored.analysis.tokens[0], selected), 'こめ');
+  assert.deepStrictEqual(tokenMeaningForDisplay(restored.analysis.tokens[0], selected), {
+    text: '(husked grains of) rice',
+    source: 'JMdict',
+  });
+  assert.equal(restored.correctedText, '米');
+});
+
+test('saving or leaving after detail review keeps its analysis and word decisions', () => {
+  const persisted = updateAnalysisTokenReview({ ...fixture, savedAt: '2026-09-30T00:01:00.000Z' }, 0, {
+    dictionaryCandidateId: '1253020:とりにく',
+    ignored: true,
+  });
+  const staleCaptureScreen = { ...persisted, analysis: null, analysisReview: {} };
+  const refreshed = mergePersistedAnalysis(staleCaptureScreen, captureFromRow(captureToRow(persisted)));
+  const reopened = captureFromRow(captureToRow(refreshed));
+
+  assert.deepStrictEqual(reopened.analysis, fixture.analysis);
+  assert.deepStrictEqual(reopened.analysisReview, { '0': { ignored: true, dictionaryCandidateId: '1253020:とりにく' } });
+  assert.equal(reopened.savedAt, persisted.savedAt);
+});
+
+test('changing manual text invalidates old analysis and rejects a stale persisted result', () => {
+  const edited = updateManualCorrection(fixture, '別の文です。');
+  const merged = mergePersistedAnalysis(edited, fixture);
+
+  assert.equal(merged.correctedText, '別の文です。');
+  assert.equal(merged.analysis, null);
+  assert.deepStrictEqual(merged.analysisReview, {});
+});
+
+test('stale capture state preserves detail translation and word choices even with cached analysis', () => {
+  const persisted = {
+    ...updateAnalysisTokenReview(fixture, 0, { dictionaryCandidateId: '1253020:とりにく', ignored: true }),
+    sentenceTranslation: {
+      sourceText: fixture.correctedText, targetLanguage: 'en', text: 'Please give me chicken.',
+      wordMeanings: [{ tokenIndex: 0, surface: '鶏肉', text: 'chicken meat' }],
+    },
+  };
+  const refreshed = mergePersistedAnalysis(fixture, persisted);
+  assert.deepStrictEqual(refreshed.analysisReview, persisted.analysisReview);
+  assert.deepStrictEqual(refreshed.sentenceTranslation, persisted.sentenceTranslation);
+});
+
 test('missing automatic reading remains unresolved until a dictionary candidate is selected', () => {
   const token = {
     ...fixture.analysis.tokens[0], reading: null,
@@ -172,6 +282,19 @@ test('legacy selected findings are hydrated when loaded and remain editable', ()
   assert.equal(edited.rawText, fixture.rawText);
 });
 
+test('word sense selection and rejection persist separately from analyzer output', () => {
+  const firstChoice = updateAnalysisTokenReview(fixture, 0, { dictionaryCandidateId: '1253020:とりにく', ignored: true });
+  const reviewed = updateAnalysisTokenReview(firstChoice, 1, { dictionaryCandidateId: '1051240:を' });
+  const restored = captureFromRow(captureToRow(reviewed));
+
+  assert.deepStrictEqual(restored.analysisReview, {
+    '0': { dictionaryCandidateId: '1253020:とりにく', ignored: true },
+    '1': { ignored: false, dictionaryCandidateId: '1051240:を' },
+  });
+  assert.deepStrictEqual(restored.analysis, fixture.analysis);
+  assert.equal(restored.correctedText, fixture.correctedText);
+});
+
 test('analysis requests are restricted to a local service host', () => {
   assert.equal(isLocalAnalysisUrl('http://192.168.1.12:8080'), true);
   assert.equal(isLocalAnalysisUrl('http://yugen.local:8080'), true);
@@ -180,7 +303,7 @@ test('analysis requests are restricted to a local service host', () => {
 
 test('analysis failures explain how to restore readings without risking OCR text', () => {
   assert.match(analysisFailureMessage(new TypeError('Network request failed.')), /same Wi-Fi/i);
-  assert.match(analysisFailureMessage(new Error('Local Japanese analysis is not configured.')), /EXPO_PUBLIC_ANALYSIS_BASE_URL/);
+  assert.match(analysisFailureMessage(new Error('Local Japanese analysis is not configured.')), /start with pnpm --dir mobile start:dev-client/i);
   assert.match(analysisFailureMessage(new Error('Analysis service returned 503.')), /HTTP 503/i);
   assert.match(analysisFailureMessage(new Error('Analysis returned an incompatible result.')), /dev client/i);
   assert.match(analysisFailureMessage(new Error('other error')), /\(other error\).*Your OCR text is still safe/i, 'The real cause stays visible');
@@ -274,6 +397,61 @@ test('drawn OCR area is constrained to the image and maps findings back to the s
   );
 });
 
+test('selecting, editing, and removing findings preserves the raw OCR result', () => {
+  const unselected = {
+    ...fixture,
+    correctedText: '',
+    selectedRegionId: null,
+    regions: fixture.regions.map((region) => ({ ...region, review: { selected: false } })),
+  };
+  const selected = updateAnalysisTokenReview(toggleRegionSelection(unselected, '0:1'), 0, { dictionaryCandidateId: '1253020:とりにく' });
+  const corrected = updateRegionCorrection(selected, '0:1', '鶏肉をお願いします。');
+  const deselected = toggleRegionSelection(corrected, '0:1');
+  const removed = excludeRegion(corrected, '0:1');
+
+  assert.equal(deselected.correctedText, '');
+  assert.equal(deselected.regions[0].review.correctedText, '鶏肉をお願いします。');
+  assert.equal(removed.rawText, fixture.rawText);
+  assert.equal(removed.regions[0].text, fixture.regions[0].text);
+  assert.equal(removed.regions[0].review.excluded, true);
+  assert.equal(removed.correctedText, '');
+  assert.equal(corrected.analysis, null);
+  assert.deepStrictEqual(corrected.analysisReview, {});
+});
+
+test('selected OCR findings join in order without changing OCR text', () => {
+  const twoLines = {
+    ...fixture,
+    selectedRegionId: null,
+    correctedText: '',
+    regions: [
+      { ...fixture.regions[0], review: { selected: false } },
+      { ...fixture.regions[0], id: '0:2', text: 'お願いします。', bounds: { ...fixture.regions[0].bounds, y: 0.5 }, review: { selected: false } },
+    ],
+  };
+  const selectedFirst = toggleRegionSelection(twoLines, '0:1');
+  const selectedBoth = toggleRegionSelection(selectedFirst, '0:2');
+  const joined = joinSelectedFindings(selectedBoth, true);
+  const restoredLineBreaks = joinSelectedFindings(joined, false);
+
+  assert.equal(selectedBoth.correctedText, '鶏肉をください。\nお願いします。');
+  assert.equal(joined.correctedText, '鶏肉をください。お願いします。');
+  assert.equal(restoredLineBreaks.correctedText, selectedBoth.correctedText);
+  assert.equal(selectedBoth.regions[0].text, '鶏肉をください。');
+  assert.equal(selectedBoth.regions[1].text, 'お願いします。');
+  assert.equal(joined.rawText, fixture.rawText);
+});
+
+test('restoring a removed finding preserves its correction and OCR source', () => {
+  const removed = excludeRegion(fixture, '0:1');
+  const restored = restoreRegion(removed, '0:1');
+
+  assert.equal(restored.regions[0].review.excluded, false);
+  assert.equal(restored.regions[0].review.correctedText, fixture.correctedText);
+  assert.equal(restored.rawText, fixture.rawText);
+  assert.equal(restored.regions[0].text, fixture.regions[0].text);
+});
+
 test('older captures hydrate the selected finding without replacing its correction', () => {
   const legacy = structuredClone(fixture);
   delete legacy.regions[0].review;
@@ -283,6 +461,25 @@ test('older captures hydrate the selected finding without replacing its correcti
   assert.equal(hydrated.regions[0].review.selected, true);
   assert.equal(hydrated.regions[0].review.correctedText, fixture.correctedText);
   assert.equal(hydrated.rawText, fixture.rawText);
+});
+
+
+test('native OCR blocks remain separate, unchecked findings can be restored, and joins stay in their active group', () => {
+  const photo = selectRecognizedFindings({ ...fixture, savedAt: null, regions: [
+    { ...fixture.regions[0], id: '0:0', text: '鶏肉' },
+    { ...fixture.regions[0], id: '0:1', text: 'ください' },
+    { ...fixture.regions[0], id: '1:0', text: '果実' },
+  ] });
+  const groups = textGroupsForCapture(photo);
+  assert.deepStrictEqual(groups.map((group) => group.text), ['鶏肉\nください', '果実']);
+  const unchecked = toggleRegionSelection(photo, '0:0');
+  assert.ok(textGroupsForCapture(unchecked)[0].regionIds.includes('0:0'));
+  assert.equal(textGroupsForCapture(toggleRegionSelection(unchecked, '0:0'))[0].text, groups[0].text);
+  const joined = joinSelectedFindings(photo, true, new Set(groups[0].regionIds));
+  assert.deepStrictEqual(textGroupsForCapture(joined).map((group) => group.text), ['鶏肉ください', '果実']);
+  assert.equal(joined.rawText, photo.rawText);
+  const legacy = { ...photo, savedAt: '2026-10-03', correctedText: 'Historical correction' };
+  assert.deepStrictEqual(textGroupsForCapture(legacy).map((group) => [group.id, group.text]), [[`legacy:${photo.id}`, 'Historical correction']]);
 });
 
 test('inflected source and dictionary word keep their own written form and reading', () => {
@@ -303,73 +500,4 @@ test('optional kanji details accept old caches but reject malformed dictionary f
   const details = [{ character: '鶏', meanings: ['chicken'], onReadings: ['ケイ'], kunReadings: ['にわとり'] }];
   assert.deepStrictEqual(parseAnalysisResponse({ ...response, tokens: [{ ...response.tokens[0], kanjiDetails: details }] }, request).tokens[0].kanjiDetails, details);
   assert.throws(() => parseAnalysisResponse({ ...response, tokens: [{ ...response.tokens[0], kanjiDetails: [{ ...details[0], meanings: 42 }] }] }, request), /incompatible/);
-});
-
-test('choosing and correcting a finding preserves the raw OCR result', () => {
-  const twoLines = {
-    ...fixture,
-    selectedRegionId: null,
-    correctedText: '',
-    regions: [
-      { ...fixture.regions[0], review: { selected: false } },
-      { ...fixture.regions[0], id: '0:2', text: 'お願いします。', review: { selected: false } },
-    ],
-  };
-  const chosen = selectSingleRegion(twoLines, '0:2');
-  const corrected = updateRegionCorrection(chosen, '0:2', 'お願いしました。');
-  const switched = selectSingleRegion(corrected, '0:1');
-
-  assert.equal(chosen.correctedText, 'お願いします。');
-  assert.equal(corrected.correctedText, 'お願いしました。');
-  assert.equal(corrected.regions[1].text, 'お願いします。', 'OCR text stays untouched');
-  assert.equal(corrected.rawText, fixture.rawText);
-  assert.equal(switched.correctedText, '鶏肉をください。');
-  assert.equal(switched.regions[1].review.correctedText, 'お願いしました。', 'Another line keeps its correction');
-  assert.deepStrictEqual(captureFromRow(captureToRow(corrected)), corrected);
-  const manual = updateManualCorrection(corrected, '手入力の文。');
-  assert.equal(manual.selectedRegionId, null);
-  assert.equal(manual.rawText, fixture.rawText);
-});
-
-test('brush cleanup removes findings while preserving source, corrections and undo state', () => {
-  const chosen = selectSingleRegion({ ...fixture, regions: [
-    { ...fixture.regions[0], id: 'first', text: '米', review: { selected: false } },
-    { ...fixture.regions[0], id: 'noise', text: '1000', review: { selected: false } },
-  ] }, 'first');
-  const corrected = updateRegionCorrection(chosen, 'first', 'お米');
-  const snapshot = structuredClone(corrected);
-  const brushed = excludeRegions(corrected, new Set(['noise']));
-  assert.equal(brushed.correctedText, 'お米');
-  assert.equal(brushed.rawText, fixture.rawText);
-  assert.equal(brushed.regions[1].text, '1000');
-  assert.equal(brushed.regions[1].review.excluded, true);
-  assert.deepStrictEqual(corrected, snapshot, 'Undo snapshot must remain untouched');
-  assert.deepStrictEqual(captureFromRow(captureToRow(brushed)), brushed);
-  assert.equal(excludeRegions(brushed, new Set(['noise'])), brushed, 'An already removed finding is not removed again');
-  const removedChoice = excludeRegions(brushed, new Set(['first']));
-  assert.equal(removedChoice.correctedText, '', 'Removing the chosen line clears the selection');
-  assert.equal(removedChoice.selectedRegionId, null);
-  assert.equal(selectSingleRegion(removedChoice, 'first'), removedChoice, 'A removed finding cannot be chosen');
-  const restored = restoreRegion(removedChoice, 'first');
-  assert.equal(restored.regions[0].review.excluded, false);
-  assert.equal(restored.regions[0].review.correctedText, 'お米', 'Restore keeps the correction');
-  assert.equal(restored.regions[0].text, '米');
-  assert.equal(restored.correctedText, 'お米', 'A restored finding is kept again');
-});
-
-test('unchecking and rechecking kept findings preserves corrections and the raw OCR result', () => {
-  const recognized = selectRecognizedFindings({ ...fixture, regions: [
-    { ...fixture.regions[0], text: '鶏肉をください。' },
-    { ...fixture.regions[0], id: '0:2', text: 'お願いします。' },
-  ] });
-  assert.equal(recognized.correctedText, '鶏肉をください。\nお願いします。', 'Lines keep their original breaks');
-  const corrected = updateRegionCorrection(recognized, '0:1', '鶏肉をお願いします。');
-  const unchecked = toggleRegionSelection(corrected, '0:1');
-  assert.equal(unchecked.correctedText, 'お願いします。');
-  assert.equal(unchecked.regions[0].review.correctedText, '鶏肉をお願いします。', 'An unchecked line keeps its correction');
-  assert.equal(toggleRegionSelection(unchecked, '0:1').correctedText, '鶏肉をお願いします。\nお願いします。');
-  assert.equal(unchecked.rawText, fixture.rawText);
-  assert.equal(unchecked.regions[0].text, fixture.regions[0].text);
-  const removed = excludeRegions(unchecked, new Set(['0:1']));
-  assert.equal(toggleRegionSelection(removed, '0:1'), removed, 'A removed finding is restored, not toggled');
 });

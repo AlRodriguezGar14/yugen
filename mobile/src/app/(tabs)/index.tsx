@@ -1,26 +1,33 @@
-import { useCallback, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { router, useFocusEffect } from 'expo-router';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { ActivityIndicator, Alert, Image, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
-import { loadLibraryCaptures, deleteCapture, deleteTextGroup, loadStudyCards, loadPracticeCards, type PracticeCard, type StudyCard } from '../../capture/store';
+import { deleteCapture, deleteTextGroup, loadLibraryCaptures, loadPracticeCards, loadStudyCards, type PracticeCard, type StudyCard } from '../../capture/store';
 import { confirmEntryDeletion } from '../../capture/entryActions';
 import { photoSummary } from '../../capture/review';
+import { recordedMeaning } from '../../capture/studyCards';
+import StatusMessage from '../../capture/StatusMessage';
+import { onStudyChange } from '../../capture/studyChanges';
 import type { CaptureRecord } from '../../capture/types';
 import { colors } from '../../theme';
 
 export default function LibraryScreen() {
   const [collection, setCollection] = useState<'texts' | 'vocabulary' | 'practice' | 'photos'>('texts');
-  const [query, setQuery] = useState('');
   const [practiceCards, setPracticeCards] = useState<PracticeCard[]>([]);
+  const [query, setQuery] = useState('');
   const [cards, setCards] = useState<StudyCard[]>([]);
   const [captures, setCaptures] = useState<CaptureRecord[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [loadAttempt, setLoadAttempt] = useState(0);
+  const loadGeneration = useRef(0);
   const [deletingId, setDeletingId] = useState<string | null>(null);
   const [status, setStatus] = useState<{ text: string; error: boolean } | null>(null);
+
+  // Deletes, then reloads the persisted state; the reload also cancels any older in-flight load.
   function remove(id: string, action: () => Promise<unknown>, done: string, failed: string) {
     if (deletingId) return;
+    loadGeneration.current += 1; // an in-flight load must not publish rows from before this mutation
     setDeletingId(id);
     setStatus({ text: 'Deleting…', error: false });
     action()
@@ -41,12 +48,20 @@ export default function LibraryScreen() {
       options.keepPracticeCards ? 'Text deleted. Its practice card, words and photo remain.' : 'Text deleted. Its words and photo remain.', 'The text could not be deleted. Try again.'));
   }
 
+  // A card edit/delete can commit after the user already returned here; reload the persisted state when it does.
+  useEffect(() => onStudyChange(() => {
+    loadGeneration.current += 1;
+    setLoadAttempt((value) => value + 1);
+  }), []);
+
   useFocusEffect(useCallback(() => {
+    const generation = ++loadGeneration.current;
+    const current = () => generation === loadGeneration.current;
     let active = true;
     setLoading(true);
     Promise.all([loadLibraryCaptures(), loadStudyCards(), loadPracticeCards()])
       .then(([items, savedCards, practice]) => {
-        if (active) {
+        if (active && current()) {
           setCaptures(items);
           setCards(savedCards);
           setPracticeCards(practice);
@@ -54,10 +69,10 @@ export default function LibraryScreen() {
         }
       })
       .catch(() => {
-        if (active) setError('Your saved sentences could not be opened. Try again.');
+        if (active && current()) setError('Your saved sentences could not be opened. Try again.');
       })
       .finally(() => {
-        if (active) setLoading(false);
+        if (active && current()) setLoading(false);
       });
     return () => { active = false; };
     // Retry must re-run the load while the tab remains focused.
@@ -101,8 +116,8 @@ export default function LibraryScreen() {
           <Text style={styles.sectionTitle}>{collection === 'texts' ? 'Saved texts' : collection === 'vocabulary' ? 'My vocabulary' : collection === 'practice' ? 'Practice cards' : 'Photo sources'}</Text>
           <Text style={styles.count}>{count.toString().padStart(2, '0')}</Text>
         </View>
+        <StatusMessage text={status?.text ?? null} error={status?.error} />
 
-        {status && <Text accessibilityLiveRegion="polite" style={styles.emptyCopy}>{status.text}</Text>}
         {loading ? (
           <ActivityIndicator color={colors.green} style={styles.loader} />
         ) : error ? (
@@ -190,10 +205,10 @@ export default function LibraryScreen() {
                     {collection === 'vocabulary' && <Text style={styles.vocabularyReading}>{card.reading}</Text>}
                     <Text numberOfLines={2} style={styles.savedText}>{card.kind === 'word' ? card.lemma : card.sourceText}</Text>
                     {collection === 'vocabulary' && card.personalMeaning && <Text style={styles.vocabularyMeaning}>Your meaning · {card.personalMeaning}</Text>}
-                    {collection === 'vocabulary' && !card.personalMeaning && <Text style={styles.vocabularyMeaning}>{card.wordSnapshot?.dictionaryCandidates[0]?.meanings.join('; ') ?? card.wordSnapshot?.curatedMeaning ?? 'Meaning unavailable'}</Text>}
+                    {collection === 'vocabulary' && !card.personalMeaning && <Text style={styles.vocabularyMeaning}>{recordedMeaning(card)}</Text>}
                     <Text style={styles.savedDate}>
                       {new Date(card.createdAt).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })}
-                      {' · '}{collection === 'vocabulary' ? 'Meaning, kanji, photo' : 'Readings, meanings, photo'}
+                      {' · '}{collection === 'vocabulary' ? 'Meaning, kanji, photo, practice' : 'Readings, meanings, photo, practice'}
                     </Text>
                   </View>
                   <Text style={styles.savedArrow}>›</Text>

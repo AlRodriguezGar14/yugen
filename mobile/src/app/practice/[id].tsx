@@ -1,10 +1,12 @@
-import { useEffect, useState } from 'react';
-import { router, useLocalSearchParams } from 'expo-router';
+import { useCallback, useEffect, useState } from 'react';
+import { router, useFocusEffect, useLocalSearchParams } from 'expo-router';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { ActivityIndicator, Alert, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 import { deletePracticeCard, loadCaptureById, loadPracticeCard, type PracticeCard } from '../../capture/store';
 import SourcePhoto from '../../capture/SourcePhoto';
 import type { CaptureRecord } from '../../capture/types';
+import StatusMessage from '../../capture/StatusMessage';
+import { afterCommit, onStudyChange } from '../../capture/studyChanges';
 import { colors } from '../../theme';
 
 /** A recall exercise: the prompt first, the answer only on request. Deleting it never touches its entry. */
@@ -16,18 +18,29 @@ export default function PracticeCardScreen() {
   const [deleting, setDeleting] = useState(false);
   const [status, setStatus] = useState<{ text: string; error: boolean } | null>(null);
   const [deleted, setDeleted] = useState(false);
+  const [version, setVersion] = useState(0);
   const [loadFailed, setLoadFailed] = useState(false);
   // undefined: not requested; null: the original photo no longer exists.
   const [photo, setPhoto] = useState<CaptureRecord | null | undefined>(undefined);
 
-  useEffect(() => {
+  // Its entry may be edited while this screen stays mounted below it: reload on return and on committed changes.
+  useEffect(() => onStudyChange(() => setVersion((value) => value + 1)), []);
+  useFocusEffect(useCallback(() => {
     let active = true;
+    // Withhold the previous card until the refreshed one arrives, so a quick Reveal can never show a stale answer.
+    setRevealed(false);
+    setCard(null);
+    setPhoto(undefined);
+    setLoading(true);
+    setLoadFailed(false);
     loadPracticeCard(id)
       .then((loaded) => { if (active) setCard(loaded); })
       .catch(() => { if (active) { setLoadFailed(true); setStatus({ text: 'This practice card could not be opened. Go back and try again.', error: true }); } })
       .finally(() => { if (active) setLoading(false); });
     return () => { active = false; };
-  }, [id]);
+    // A committed change must re-run the load while this screen stays focused.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [id, version]));
 
   function confirmDelete() {
     if (!card || deleting) return;
@@ -36,7 +49,7 @@ export default function PracticeCardScreen() {
       { text: 'Delete practice card', style: 'destructive', onPress: () => {
         setDeleting(true);
         setStatus({ text: 'Deleting…', error: false });
-        deletePracticeCard(card.id)
+        afterCommit(deletePracticeCard(card.id))
           .then(() => { setDeleted(true); setStatus({ text: card.entryId ? 'Practice card deleted. Its entry remains.' : 'Practice card deleted.', error: false }); })
           .catch(() => setStatus({ text: 'The practice card could not be deleted. Try again.', error: true }))
           .finally(() => setDeleting(false));
@@ -58,7 +71,7 @@ export default function PracticeCardScreen() {
         <Text style={styles.title}>Practice card</Text>
       </View>
       <ScrollView contentContainerStyle={styles.content}>
-        {status && <Text accessibilityLiveRegion="polite" style={styles.body}>{status.text}</Text>}
+        <StatusMessage text={status?.text ?? null} error={status?.error} />
         {loading ? <ActivityIndicator accessibilityLabel="Loading practice card" /> : deleted || loadFailed || !card || !answer ? (
           !deleted && !loadFailed && <Text style={styles.body}>{card ? 'This practice card has no answer to show.' : 'This practice card was deleted.'}</Text>
         ) : (

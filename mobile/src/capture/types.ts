@@ -97,6 +97,10 @@ export type AnalysisResponse = {
   tokens: AnalysisToken[];
 };
 
+export function analysisRequestFor(capture: CaptureRecord): AnalysisRequest {
+  return { contractVersion: ANALYSIS_CONTRACT_VERSION, language: capture.language, text: capture.correctedText };
+}
+
 export type CaptureRow = {
   id: string;
   created_at: string;
@@ -168,8 +172,4 @@ export function captureFromRow(row: CaptureRow): CaptureRecord {
     analysis,
     analysisReview: analysis && row.analysis_review_json ? JSON.parse(row.analysis_review_json) as Record<string, AnalysisTokenReview> : {},
   });
-}
-
-export function analysisRequestFor(capture: CaptureRecord): AnalysisRequest {
-  return { contractVersion: ANALYSIS_CONTRACT_VERSION, language: capture.language, text: capture.correctedText };
 }
