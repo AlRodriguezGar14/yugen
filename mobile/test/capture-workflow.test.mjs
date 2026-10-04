@@ -4,6 +4,7 @@ import { stripTypeScriptTypes } from 'node:module';
 import test from 'node:test';
 import ts from 'typescript';
 import * as analysisHelpers from '../src/capture/analysis.ts';
+import * as reviewHelpers from '../src/capture/review.ts';
 import * as translationHelpers from '../src/capture/translation.ts';
 import { excludeRegions, markCaptureOcrFailed, mergePersistedAnalysis, selectRecognizedFindings, updateRegionCorrection } from '../src/capture/review.ts';
 import { brushTouchesBounds, cropBoundsToPixels, mapCropBoundsToImage, normalizeBounds, ocrResizeFor } from '../src/capture/geometry.ts';
@@ -88,54 +89,81 @@ async function mountScreen(path, dependencies, routeParams = {}, router = { push
   const tree = () => { cursor = 0; return exports.default(props); };
   return { slots, frame, refocus, press, tree };
 }
-for (const marker of ['  async function finishDraftSave(', '  async function recognize(', '  async function chooseImage(', '  async function saveSelection(', '  async function startNewCapture(', '  return (\n    <SafeAreaView']) {
-  assert.ok(source.includes(marker), `Missing handler extraction marker: ${marker}`);
+// Resolve production declarations by AST name rather than their formatting or neighboring handlers.
+function appDeclarations(...names) {
+  const file = ts.createSourceFile('App.tsx', source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+  const found = new Map();
+  function visit(node) {
+    if (ts.isFunctionDeclaration(node) && node.name && names.includes(node.name.text)) found.set(node.name.text, node.getText(file));
+    if (ts.isVariableStatement(node)) for (const declaration of node.declarationList.declarations) {
+      if (ts.isIdentifier(declaration.name) && names.includes(declaration.name.text)) found.set(declaration.name.text, node.getText(file));
+    }
+    ts.forEachChild(node, visit);
+  }
+  visit(file);
+  for (const name of names) assert.ok(found.has(name), `Missing production declaration: ${name}`);
+  return names.map((name) => found.get(name)).join('\n');
 }
-const functions = [
-  source.slice(source.indexOf('  async function finishDraftSave('), source.indexOf('  async function recognize(')),
-  source.slice(source.indexOf('  async function recognize('), source.indexOf('  async function chooseImage(')),
-  source.slice(source.indexOf('  async function chooseImage('), source.indexOf('  async function saveSelection(')),
-  source.slice(source.indexOf('  async function saveSelection('), source.indexOf('  async function startNewCapture(')),
-  source.slice(source.indexOf('  async function startNewCapture('), source.indexOf('  if (showCamera)')),
-].join('\n');
+const sessionSource = await readFile(new URL('../src/capture/useCaptureSession.ts', import.meta.url), 'utf8');
 
-// Execute the shipped handlers with controlled I/O rather than duplicating their workflow.
-function handlers(capture, analyzeJapaneseImage = async () => { throw new Error('Unexpected OCR'); }, persisted = capture, failCompleteSave = false) {
-  let shown = capture;
-  let settled = 0;
-  let error = null;
+// Compiles the shipped hook; exposes its existing refs only for controlled queued-write I/O.
+function handlers(capture, analyzeJapaneseImage = async () => { throw new Error('Unexpected OCR'); }, persisted = capture, failCompleteSave = false, overrides = {}) {
+  const states = [];
+  let cursor = 0;
   const saved = [];
   const routes = [];
-  const activeOcrId = { current: null };
-  const currentCapture = { current: capture };
-  const pendingDraftSave = { current: Promise.resolve() };
+  const deletedIds = new Set();
+  const react = {
+    useState(initial) {
+      const index = cursor++;
+      states[index] = typeof initial === 'function' ? initial() : initial;
+      return [states[index], (value) => { states[index] = typeof value === 'function' ? value(states[index]) : value; }];
+    },
+    useRef: (value) => ({ current: value }), useCallback: (callback) => callback,
+    useEffect: () => {},
+  };
+  const saveCapture = async (record) => {
+    if (record.status === 'complete' && failCompleteSave) { failCompleteSave = false; throw new Error('OCR save failed'); }
+    saved.push(record); persisted = record;
+  };
+  const modules = {
+    react, 'react-native': { AppState: { addEventListener: () => ({ remove() {} }) } },
+    './store': { saveCapture: overrides.saveCapture ?? saveCapture, isCaptureDeleted: (id) => deletedIds.has(id) },
+  };
+  const exported = {};
+  const instrumented = sessionSource.replace('return { ...session,', 'return { dirtyDrafts, writeQueue, ...session,');
+  assert.notEqual(instrumented, sessionSource, 'Expose the production queue refs for controlled I/O');
+  new Function('require', 'exports', ts.transpileModule(instrumented, { compilerOptions: { module: ts.ModuleKind.CommonJS } }).outputText)(
+    (name) => { assert.ok(name in modules, `Unexpected hook module ${name}`); return modules[name]; }, exported);
+  const session = exported.useCaptureSession();
+  session.currentCapture.current = capture;
+  states[0] = { capture, error: null, notice: null };
   const deps = {
-    capture, currentCapture, activeOcrId, pendingDraftSave, analyzeJapaneseImage, saveTextGroup: async (record, group) => { saved.push({ ...record, savedGroup: group }); }, mergePersistedAnalysis, markCaptureOcrFailed, selectRecognizedFindings,
-    isCaptureDeleted: () => false,
+    useCallback: (callback) => callback, run: session.run, flushDraft: session.flushDraft, currentCapture: session.currentCapture,
+    activeOperation: session.activeOperation, analyzeJapaneseImage, markCaptureOcrFailed, selectRecognizedFindings,
+    rowGroupsForCapture: reviewHelpers.rowGroupsForCapture, textGroupsForCapture: reviewHelpers.textGroupsForCapture,
+    savedTextNotice: reviewHelpers.savedTextNotice, unsavedRows: reviewHelpers.unsavedRows,
+    saveTextGroup: async (record, group) => { saved.push({ ...record, savedGroup: group }); return null; }, loadTextGroups: async () => [],
+    saveAnalysisReviewForText: async (_id, _text, review) => { persisted = { ...persisted, analysisReview: review }; return true; },
+    afterCommit: (mutation) => mutation, isCaptureDeleted: (id) => deletedIds.has(id),
     ImagePicker: { launchImageLibraryAsync: async () => ({ canceled: false, assets: [{ uri: 'file:///photo.jpg', width: 4000, height: 3000 }] }) },
     Directory: class { uri = 'file:///private/captures'; create() {} },
     File: class { constructor(base, name) { this.uri = name ? `${base.uri}/${name}` : base; } async copy() {} },
     Paths: { document: 'file:///private' }, newId: () => 'imported', imageExtension: () => 'jpg', setShowCamera: () => {},
     loadCaptureById: async () => persisted,
-    saveCapture: async (record) => {
-      if (record.status === 'complete' && failCompleteSave) {
-        failCompleteSave = false;
-        throw new Error('OCR save failed');
-      }
-      saved.push(record);
-      persisted = record;
-    },
-    setCapture: (record) => {
-      if (record?.status === 'complete' || record?.status === 'failed') assert.equal(activeOcrId.current, null, 'OCR must settle before publishing completion');
-      shown = record;
-      currentCapture.current = record;
-    },
-    setBusy: () => {}, setNotice: () => {}, setError: (value) => { error = value; },
-    setOcrSettled: (update) => { settled = update(settled); },
-    router: { push: (route) => { routes.push(route); }, setParams: () => {} },
+    router: { push: (route) => routes.push(route), setParams: () => {} },
+    ...overrides,
   };
-  const run = new Function(...Object.keys(deps), `${stripTypeScriptTypes(functions)}\nreturn { recognize, chooseImage, importImageAsset, startNewCapture, saveSelection, finishDraftSave };`)(...Object.values(deps));
-  return { ...run, saved, routes, activeOcrId, pendingDraftSave, setPersisted: (record) => { persisted = record; }, get shown() { return shown; }, get settled() { return settled; }, get error() { return error; } };
+  const code = appDeclarations('recognizeRecord', 'startNewCapture', 'importAsset', 'chooseImage', 'importCameraPhoto', 'saveSelection', 'saveVocabularyWord');
+  const shipped = new Function(...Object.keys(deps), `${stripTypeScriptTypes(code)}\nreturn { recognizeRecord, startNewCapture, chooseImage, importCameraPhoto, saveSelection, saveVocabularyWord };`)(...Object.values(deps));
+  return {
+    ...shipped, recognize: (record) => session.run('ocr', (context) => shipped.recognizeRecord(record, context)),
+    saved, routes, deletedIds, session, currentCapture: session.currentCapture,
+    pendingDraftSave: session.writeQueue, dirtyDrafts: session.dirtyDrafts,
+    setPersisted: (record) => { persisted = record; },
+    completePendingWrite: (record) => { saved.push(record); persisted = record; session.dirtyDrafts.current.delete(record.id); },
+    get shown() { return states[0].capture; }, get settled() { return states[2]; }, get error() { return states[0].error; }, get notice() { return states[0].notice; },
+  };
 }
 
 test('capture handlers defer fresh navigation, preserve OCR retry output, and save explicit valid choices', async () => {
@@ -204,7 +232,7 @@ test('capture handlers defer fresh navigation, preserve OCR retry output, and sa
   const draft = handlers(latestDraft, undefined, { ...fixture, sentenceTranslation: oldTranslation });
   let resolveDraft;
   draft.pendingDraftSave.current = new Promise((resolve) => { resolveDraft = resolve; })
-    .then(() => draft.setPersisted(latestDraft));
+    .then(() => draft.completePendingWrite(latestDraft));
   const leaving = draft.startNewCapture();
   await Promise.resolve();
   assert.equal(draft.saved.length, 0, 'New must wait for pending draft persistence');
@@ -215,9 +243,10 @@ test('capture handlers defer fresh navigation, preserve OCR retry output, and sa
   assert.equal(draft.shown, null);
 
   const failedDraft = handlers(latestDraft, undefined, { ...fixture, sentenceTranslation: oldTranslation });
+  failedDraft.dirtyDrafts.current.set(latestDraft.id, latestDraft);
   failedDraft.pendingDraftSave.current = Promise.reject(new Error('Draft save failed'));
   await failedDraft.startNewCapture();
-  assert.equal(failedDraft.saved.length, 2, 'Failed draft write retries the current snapshot before leaving');
+  assert.equal(failedDraft.saved.length, 1, 'Failed draft write retries the current snapshot before leaving without a redundant full-record write');
   assert.deepStrictEqual(failedDraft.saved.at(-1).sentenceTranslation, newTranslation);
   await failedDraft.pendingDraftSave.current;
   assert.equal(failedDraft.shown, null);
@@ -253,45 +282,37 @@ test('actual row save handler sends only matching readings and that row’s own 
 });
 
 test('row save handler records resolved words and reports pending ones without hiding missing readings', async () => {
-  const start = source.indexOf('  async function saveSelection(');
-  const snippet = source.slice(start, source.indexOf('  async function saveVocabularyWord(', start));
-  const { savedTextNotice, unsavedRows } = await import('../src/capture/review.ts');
-  let notice = null;
-  let error = null;
   let words = { added: 2, existing: 1, pending: 1, unknown: 0 };
   let fail = false;
   const savedGroups = [];
   const capture = { ...fixture, regions: [{ ...fixture.regions[0], id: '0:0', text: '米', review: { selected: true } }, { ...fixture.regions[0], id: '1:0', text: '肉', review: { selected: true } }] };
   const row = { id: `group:${capture.id}:row:0:0`, captureId: capture.id, regionIds: ['0:0'], text: '米', analysis: null, analysisReview: {}, savedAt: null };
-  const deps = { capture, setBusy() {}, setError: (value) => { error = value; }, setNotice: (value) => { notice = value; }, setCapture() {}, finishDraftSave: async () => {},
-    loadCaptureById: async () => capture, isCaptureDeleted: () => false,
+  const dependencies = {
     saveTextGroup: async (_record, group) => { if (fail) throw new Error('Word write failed'); savedGroups.push(group); return words; },
-    loadTextGroups: async () => savedGroups, unsavedRows, savedTextNotice, afterCommit: (mutation) => mutation };
-  const saveSelection = new Function(...Object.keys(deps), `${stripTypeScriptTypes(snippet)}\nreturn saveSelection;`)(...Object.values(deps));
-  await saveSelection(capture, row);
-  assert.equal(notice, 'Text saved · 2 new words in Vocabulary · 1 already saved · 1 word needs a meaning choice. 1 row not saved yet.');
+    loadTextGroups: async () => savedGroups,
+  };
+  const screen = handlers(capture, undefined, capture, false, dependencies);
+  await screen.saveSelection(capture, row);
+  assert.equal(screen.notice, 'Text saved · 2 new words in Vocabulary · 1 already saved · 1 word needs a meaning choice. 1 row not saved yet.');
   words = null;
-  await saveSelection(capture, row);
-  assert.match(notice, /Text saved in Saved texts with 0 words: readings are unavailable\. Retry readings/);
-  notice = null;
+  await screen.saveSelection(capture, row);
+  assert.match(screen.notice, /Text saved in Saved texts with 0 words: readings are unavailable\. Retry readings/);
+  screen.session.clearNotice();
   fail = true;
-  await saveSelection(capture, { ...row, id: `group:${capture.id}:row:1:0`, regionIds: ['1:0'], text: '肉' });
-  assert.equal(notice, null, 'A rolled-back save never reports success');
-  assert.match(error, /could not be saved/);
+  await screen.saveSelection(capture, { ...row, id: `group:${capture.id}:row:1:0`, regionIds: ['1:0'], text: '肉' });
+  assert.equal(screen.notice, null, 'A rolled-back save never reports success');
+  assert.match(screen.error, /could not be saved/);
 
   // Unchecked legacy lines leave the capture-wide selection empty; a nonblank row still saves on its own text.
   fail = false;
-  error = null;
   savedGroups.length = 0;
   const unselected = { ...capture, correctedText: '', regions: capture.regions.map((region) => ({ ...region, review: { selected: false } })) };
-  deps.capture = unselected;
-  deps.loadCaptureById = async () => unselected;
-  const fromEmptySelection = new Function(...Object.keys(deps), `${stripTypeScriptTypes(snippet)}\nreturn saveSelection;`)(...Object.values(deps));
-  await fromEmptySelection(unselected, row);
-  assert.equal(error, null);
+  const fromEmptySelection = handlers(unselected, undefined, unselected, false, dependencies);
+  await fromEmptySelection.saveSelection(unselected, row);
+  assert.equal(fromEmptySelection.error, null);
   assert.deepStrictEqual(savedGroups.map((group) => group.id), [row.id], 'The row is saved even with an empty parent selection');
-  await fromEmptySelection(unselected, { ...row, text: ' \n ' });
-  assert.match(error, /enter some text/, 'An empty row is still rejected');
+  await fromEmptySelection.saveSelection(unselected, { ...row, text: ' \n ' });
+  assert.match(fromEmptySelection.error, /enter some text/, 'An empty row is still rejected');
   assert.equal(savedGroups.length, 1);
 });
 
@@ -486,8 +507,7 @@ test('actual brush stroke and undo handlers preserve corrections and raw OCR', (
     + reviewSource.slice(reviewSource.indexOf('  function paintNoise('), reviewSource.indexOf('  return (\n    <KeyboardAvoidingView'));
   const deps = { currentCapture, brushStroke, imageFit: { left: 0, top: 0, width: 300, height: 300 },
     brushTouchesBounds, excludeRegions, setBrushPoint: () => {},
-    onChange: (capture) => { currentCapture.current = capture; }, onClearNotice: () => {},
-    onPersistOcrArea: (capture) => { persisted.push(capture); },
+    onChange: (capture) => { currentCapture.current = capture; persisted.push(capture); }, onClearNotice: () => {},
   };
   const run = new Function(...Object.keys(deps), `let undoHistory = []; const setUndoHistory = update => { undoHistory = typeof update === 'function' ? update(undoHistory) : update; };\n${stripTypeScriptTypes(snippet)}\nreturn {startBrush, paintNoise, finishBrush, undoBrush, applyEdit};`)(...Object.values(deps));
   const event = (x, y) => ({ nativeEvent: { locationX: x, locationY: y } });
@@ -499,7 +519,7 @@ test('actual brush stroke and undo handlers preserve corrections and raw OCR', (
   assert.equal(currentCapture.current.rawText, initial.rawText);
   run.undoBrush();
   assert.deepStrictEqual(currentCapture.current, initial);
-  assert.equal(persisted.length, 2, 'Stroke and undo are each persisted');
+  assert.equal(persisted.length, 2, 'Brush edit and undo are both handed to draft persistence');
   run.startBrush(event(80, 160));
   run.finishBrush(event(250, 160));
   const edited = updateRegionCorrection(currentCapture.current, 'keep', '私の修正。');
@@ -561,9 +581,11 @@ test('direct camera shutter hands upright photo to OCR once and recovers from ca
   const importing = new Promise((resolve) => { finishImport = resolve; });
   const entered = new Promise((resolve) => { enteredImport = resolve; });
   const photos = [];
-  const takingPhoto = { current: false };
+  const takingPhoto = { current: null };
+  const eligibility = { current: true };
+  const mounted = { current: true };
   const deps = {
-    ready: true, takingPhoto,
+    eligibility, mounted, takingPhoto,
     photoOutput: { capturePhotoToFile: async (settings) => {
       assert.equal(settings.enableShutterSound, false, 'The shutter requests no system sound (the OS may still enforce it)');
       captures += 1;
@@ -571,8 +593,11 @@ test('direct camera shutter hands upright photo to OCR once and recovers from ca
       return { filePath: '/tmp/portrait.jpg' };
     } },
     Image: { getSize: (_uri, success) => success(3000, 4000) },
-    setBusy: (value) => { busy = value; }, setError: (value) => { error = value; },
-    onPhoto: async (asset) => { photos.push(asset); enteredImport(); await importing; },
+    setPhoto: (value) => {
+      busy = value.status === 'capturing' || value.status === 'handing-off';
+      if (value.status === 'failed') error = value.message;
+    }, setError: (value) => { error = value; },
+    onPhoto: async (capture) => { photos.push(await capture()); enteredImport(); await importing; },
   };
   const takePhoto = new Function(...Object.keys(deps), `${stripTypeScriptTypes(snippet)}\nreturn takePhoto;`)(...Object.values(deps));
   const first = takePhoto();
@@ -584,12 +609,13 @@ test('direct camera shutter hands upright photo to OCR once and recovers from ca
   finishImport();
   await first;
   assert.equal(busy, false);
-  assert.equal(takingPhoto.current, false);
+  assert.equal(takingPhoto.current, null);
   failCapture = true;
+  eligibility.current = true; // The committed ready/idle render re-enables the shutter.
   await takePhoto();
   assert.match(error, /could not be captured/);
   assert.equal(busy, false);
-  assert.equal(takingPhoto.current, false, 'A capture failure must leave the shutter retryable');
+  assert.equal(takingPhoto.current, null, 'A capture failure must leave the shutter retryable');
 });
 
 test('shipped capture review shows every row with readings and its own actions, tools collapsed', async () => {
@@ -1081,40 +1107,24 @@ test('a saved text entry scopes its in-place choices to the entry and its exact 
 
 
 test('late OCR recovery and row-save completion never republish a deleted capture', async () => {
-  const extract = (start, end) => {
-    const first = source.indexOf(start);
-    const last = source.indexOf(end, first);
-    assert.ok(first >= 0 && last > first, `Missing shipped handler: ${start}`);
-    return source.slice(first, last);
-  };
-  const code = extract('  async function recognize(', '  async function chooseImage(')
-    + extract('  async function saveSelection(', '  async function saveVocabularyWord(');
   for (const operation of ['recovery', 'row']) {
     let enterSave;
     let resolveSave;
     const entered = new Promise((resolve) => { enterSave = resolve; });
     const pending = new Promise((resolve) => { resolveSave = resolve; });
-    let deleted = false;
-    let shown = { ...fixture, status: 'failed' };
     const pause = async () => { enterSave(); await pending; };
-    const dependencies = {
-      capture: shown, activeOcrId: { current: null }, finishDraftSave: async () => {}, afterCommit: async (operation) => operation,
-      saveCapture: pause, saveTextGroup: pause, loadCaptureById: async () => fixture,
-      loadTextGroups: async () => [], unsavedRows: () => [], savedTextNotice: () => 'Saved.',
-      isCaptureDeleted: () => deleted, setCapture: (value) => { shown = value; },
-      setBusy: () => {}, setError: () => {}, setNotice: () => {}, setOcrSettled: () => {},
-      analyzeJapaneseImage: () => { throw new Error('Recovery must not rerun OCR'); },
-      selectRecognizedFindings, markCaptureOcrFailed,
-    };
-    const shipped = new Function(...Object.keys(dependencies), `${stripTypeScriptTypes(code)}\nreturn { recognize, saveSelection };`)(...Object.values(dependencies));
+    const record = { ...fixture, status: 'failed' };
+    const screen = handlers(record, () => { throw new Error('Recovery must not rerun OCR'); }, fixture, false, {
+      saveCapture: pause, saveTextGroup: pause,
+    });
     const running = operation === 'recovery'
-      ? shipped.recognize(shown)
-      : shipped.saveSelection(shown, { id: 'late-group', captureId: fixture.id, text: fixture.correctedText, regionIds: [] });
+      ? screen.recognize(record)
+      : screen.saveSelection(record, reviewHelpers.rowGroupsForCapture(record)[0]);
     await entered;
-    deleted = true;
-    shown = null;
+    screen.deletedIds.add(record.id);
+    screen.session.clearDeletedCapture();
     resolveSave();
     await running;
-    assert.equal(shown, null, `${operation} completion must not reopen its deleted capture`);
+    assert.equal(screen.shown, null, `${operation} completion must not reopen its deleted capture`);
   }
 });

@@ -4,6 +4,7 @@ import { captureFromRow, captureToRow, type CaptureRecord, type CaptureRow, type
 import { hiraganaReading, isContentToken } from './analysis';
 import { rowGroupsForCapture, unsavedRows } from './review';
 import { practiceAnswer, type PracticeAnswer } from './studyCards';
+import { afterCommit } from './studyChanges';
 
 let databasePromise: Promise<SQLite.SQLiteDatabase> | undefined;
 // ponytail: in-process tombstones cover foreground OCR; persist them if work survives app restarts.
@@ -13,7 +14,8 @@ export function isCaptureDeleted(id: string): boolean {
   return deletedCaptureIds.has(id);
 }
 
-async function database(): Promise<SQLite.SQLiteDatabase> {
+/** Opens the shared, migrated database for persistence and collection projections. */
+export async function database(): Promise<SQLite.SQLiteDatabase> {
   if (!databasePromise) {
     databasePromise = (async () => {
       const db = await SQLite.openDatabaseAsync('yugen.db');
@@ -139,7 +141,7 @@ export async function saveCapture(capture: CaptureRecord): Promise<void> {
   if (deletedCaptureIds.has(capture.id)) return;
   const db = await database();
   if (deletedCaptureIds.has(capture.id)) return;
-  await writeCapture(db, capture);
+  await afterCommit(writeCapture(db, capture), 'capture');
 }
 
 async function writeCapture(db: SQLite.SQLiteDatabase, capture: CaptureRecord): Promise<void> {
@@ -164,9 +166,13 @@ async function writeCapture(db: SQLite.SQLiteDatabase, capture: CaptureRecord): 
       status = excluded.status,
       -- Legacy whole-photo saves are no longer created; a cleared flag (deleted legacy text) is never re-set by a stale draft.
       saved_at = CASE WHEN captures.saved_at IS NULL THEN NULL ELSE excluded.saved_at END,
-      translation_json = excluded.translation_json,
-      analysis_json = excluded.analysis_json,
-      analysis_review_json = excluded.analysis_review_json;`,
+      -- Exact-text enrichment has separate writers. An older draft must not replace their committed values.
+      translation_json = CASE WHEN captures.corrected_text = excluded.corrected_text
+        THEN COALESCE(captures.translation_json, excluded.translation_json) ELSE excluded.translation_json END,
+      analysis_json = CASE WHEN captures.corrected_text = excluded.corrected_text
+        THEN COALESCE(captures.analysis_json, excluded.analysis_json) ELSE excluded.analysis_json END,
+      analysis_review_json = CASE WHEN captures.corrected_text = excluded.corrected_text AND captures.analysis_json IS NOT NULL
+        THEN captures.analysis_review_json ELSE excluded.analysis_review_json END;`,
     row.id,
     row.created_at,
     row.language,
@@ -299,11 +305,10 @@ export async function loadTextGroups(captureId?: string): Promise<TextGroup[]> {
     : await db.getAllAsync<GroupRow>('SELECT * FROM text_groups ORDER BY saved_at DESC');
   return rows.map(groupFromRow);
 }
-/** Writes the source, its group and the group's sentence card; callers own the surrounding transaction. */
+/** Writes a saved group and its entry; the capture controller owns the source draft. */
 async function writeGroup(txn: SQLite.SQLiteDatabase, capture: CaptureRecord, group: TextGroup): Promise<void> {
   if (group.captureId !== capture.id || !group.text.trim()) throw new Error('This group cannot be saved.');
   if (deletedCaptureIds.has(capture.id) || !await txn.getFirstAsync('SELECT id FROM captures WHERE id = ?', capture.id)) throw new Error('The source was deleted.');
-  await writeCapture(txn, capture);
   const validAnalysis = group.analysis?.normalizedText === group.text ? group.analysis : null;
   const savedAt = group.savedAt ?? new Date().toISOString();
   await txn.runAsync(`INSERT INTO text_groups(id,capture_id,region_ids,text,analysis_json,review_json,saved_at) VALUES (?,?,?,?,?,?,?)

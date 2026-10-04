@@ -1,20 +1,20 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { router, useFocusEffect, useLocalSearchParams, useNavigation } from 'expo-router';
 import { StatusBar } from 'expo-status-bar';
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import * as ImagePicker from 'expo-image-picker';
 import { Directory, File, Paths } from 'expo-file-system';
-import { View } from 'react-native';
 import { analyzeJapaneseImage } from './src/capture/ocr';
 import CameraCapture from './src/capture/CameraCapture';
-import { markCaptureOcrFailed, mergePersistedAnalysis, rowGroupsForCapture, savedTextNotice, selectRecognizedFindings, textGroupsForCapture, unsavedRows } from './src/capture/review';
-import { isCaptureDeleted, loadCaptureById, saveCapture, saveTextGroup, addWordCard, loadTextGroups, type WordSaveOutcome } from './src/capture/store';
+import { markCaptureOcrFailed, rowGroupsForCapture, savedTextNotice, selectRecognizedFindings, textGroupsForCapture, unsavedRows } from './src/capture/review';
+import { isCaptureDeleted, loadCaptureById, saveAnalysisReviewForText, saveTextGroup, addWordCard, loadTextGroups, type WordSaveOutcome } from './src/capture/store';
 import type { CaptureRecord, CaptureSource, TextGroup } from './src/capture/types';
 import CaptureHome from './src/capture/CaptureHome';
 import CaptureReview from './src/capture/CaptureReview';
 import { styles } from './src/capture/uiStyles';
 import { tabBarStyle } from './src/theme';
 import { afterCommit } from './src/capture/studyChanges';
+import { useCaptureSession, type OperationContext } from './src/capture/useCaptureSession';
 
 function imageExtension(asset: ImagePicker.ImagePickerAsset): string {
   const name = asset.fileName ?? asset.uri.split(/[?#]/)[0];
@@ -28,301 +28,213 @@ function newId(): string {
 export default function App() {
   const params = useLocalSearchParams<{ captureId?: string; groupId?: string; fresh?: string }>();
   const resumeId = Array.isArray(params.captureId) ? params.captureId[0] : params.captureId;
-  const [capture, setCapture] = useState<CaptureRecord | null>(null);
+  const { capture, busy, error, notice, settled, currentCapture, activeOperation, run, updateDraft, flushDraft, clearNotice, clearDeletedCapture } = useCaptureSession();
   const [showCamera, setShowCamera] = useState(false);
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [notice, setNotice] = useState<string | null>(null);
-  const activeOcrId = useRef<string | null>(null);
-  const [ocrSettled, setOcrSettled] = useState(0);
-  const currentCapture = useRef(capture);
-  currentCapture.current = capture;
-  const pendingDraftSave = useRef<Promise<void>>(Promise.resolve());
-  const captureId = capture?.id;
+  const [navHidden, setNavHidden] = useState(false);
   const navigation = useNavigation();
   const bottomInset = useSafeAreaInsets().bottom;
-  const [navHidden, setNavHidden] = useState(false);
-  const hideNav = navHidden && !!captureId && !showCamera;
+  const hideNav = navHidden && !!capture && !showCamera;
 
   useEffect(() => {
     navigation.setOptions({ tabBarStyle: hideNav ? { display: 'none' } : tabBarStyle(bottomInset) });
   }, [navigation, hideNav, bottomInset]);
 
-  useFocusEffect(useCallback(() => {
-    if (!captureId || !isCaptureDeleted(captureId)) return undefined;
-    setCapture(null);
-    setBusy(false);
-    setNotice(null);
-    setError('This capture was deleted from OCR Review. Start a new capture to continue.');
-    return undefined;
-  }, [captureId]));
+  useFocusEffect(useCallback(() => { clearDeletedCapture(); }, [clearDeletedCapture, capture?.id]));
 
-  useEffect(() => {
-    if (!resumeId || currentCapture.current?.id === resumeId || activeOcrId.current) return;
-    let active = true;
-    setBusy(true);
-    Promise.resolve().then(async () => {
-      await finishDraftSave();
-      const previous = currentCapture.current;
-      if (previous) await saveCapture(mergePersistedAnalysis(previous, await loadCaptureById(previous.id)));
-      return loadCaptureById(resumeId);
-    })
-      .then(async (storedRecord) => {
-        if (!active) return;
-        const record = storedRecord?.status === 'processing' && activeOcrId.current !== storedRecord.id
-          ? markCaptureOcrFailed(storedRecord)
-          : storedRecord;
-        if (record && record !== storedRecord) {
-          try {
-            await saveCapture(record);
-          } catch {
-            // The image and selected area remain available in memory for retry.
-          }
-        }
-        if (!active) return;
-        setCapture(record);
-        setError(record?.status === 'failed'
-          ? 'OCR could not read this image. The original is still safe; retry or enter the text manually.'
-          : record ? null : 'This capture could not be found. The original may have been removed from this device.');
-        setNotice(record?.status === 'selecting'
-          ? 'Reading your restored photo…'
-          : record ? 'Original capture restored. Retry OCR or continue editing the text.' : null);
-        if (record?.status === 'selecting' && !record.correctedText.trim()) await recognize(record);
-      })
-      .catch(() => {
-        if (active) {
-          router.setParams({ captureId: currentCapture.current?.id });
-          setError('The capture could not be switched. Your current edits are still shown; open the other capture again to retry.');
-        }
-      })
-      .finally(() => { if (active) setBusy(false); });
-    return () => { active = false; };
-  }, [resumeId, ocrSettled]);
-
-  useEffect(() => {
-    if (!params.fresh || activeOcrId.current) return;
-    void startNewCapture();
-  }, [params.fresh, ocrSettled]);
-
-  async function finishDraftSave() {
-    try {
-      await pendingDraftSave.current;
-    } catch (error) {
-      if (!currentCapture.current) throw error;
-      await saveCapture(currentCapture.current);
-      pendingDraftSave.current = Promise.resolve();
-    }
-  }
-
-  async function recognize(record: CaptureRecord, ocrBounds = record.ocrBounds) {
-    if (activeOcrId.current) return;
+  // Imports and resume run OCR inside their existing job, avoiding nested operations.
+  const recognizeRecord = useCallback(async (record: CaptureRecord, context: OperationContext) => {
+    context.error(null);
+    context.notice(null);
     if (record.status === 'failed' && record.rawText) {
-      setBusy(true);
       try {
+        await flushDraft();
         const recovered = { ...record, status: 'complete' as const };
-        await finishDraftSave();
-        await saveCapture(recovered);
-        setCapture(isCaptureDeleted(recovered.id) ? null : recovered);
-        setError(null);
-        setNotice('OCR result saved. Continue reviewing your text.');
-      } catch {
-        setError('The OCR result could not be saved. Keep this screen open and retry.');
-      } finally {
-        setBusy(false);
-      }
+        await context.persist(recovered);
+        context.show(recovered);
+        context.notice('OCR result saved. Continue reviewing your text.');
+      } catch { context.error('The OCR result could not be saved. Keep this screen open and retry.'); }
       return;
     }
-    const processing = { ...record, ocrBounds: ocrBounds ?? { x: 0, y: 0, width: 1, height: 1 }, status: 'processing' as const };
+    const processing = { ...record, ocrBounds: record.ocrBounds ?? { x: 0, y: 0, width: 1, height: 1 }, status: 'processing' as const };
     let latest: CaptureRecord = processing;
-    activeOcrId.current = record.id;
-    setCapture(processing);
-    setBusy(true);
-    setError(null);
-    setNotice(null);
-
+    context.show(processing);
     try {
-      await finishDraftSave();
-      await saveCapture(processing);
-      const result = await analyzeJapaneseImage(
-        processing.imageUri,
-        processing.imageMetadata.width,
-        processing.imageMetadata.height,
-        processing.ocrBounds,
-      );
+      await flushDraft();
+      await context.persist(processing);
+      const result = await analyzeJapaneseImage(processing.imageUri, processing.imageMetadata.width,
+        processing.imageMetadata.height, processing.ocrBounds);
       latest = selectRecognizedFindings({ ...processing, rawText: result.rawText, regions: result.regions, status: 'complete',
         imageMetadata: { ...processing.imageMetadata, displayWidth: result.imageDimensions.width, displayHeight: result.imageDimensions.height },
       });
-      await saveCapture(latest);
-      setNotice(result.regions.length ? 'Text is ready. Save the rows you want to keep.' : 'No text was found. Enter it manually.');
+      await context.persist(latest);
+      context.notice(result.regions.length ? 'Text is ready. Save the rows you want to keep.' : 'No text was found. Enter it manually.');
     } catch (cause) {
-      // Native OCR reasons (size limits, missing model) appear in device logs for diagnosis.
       console.warn('Yugen OCR failed', cause);
-      const failed = markCaptureOcrFailed(latest);
-      latest = failed;
-      try {
-        await saveCapture(failed);
-      } catch {
-        // The image remains in app-private storage if saving the OCR result fails.
+      latest = markCaptureOcrFailed(latest);
+      try { await context.persist(latest); } catch {
+        // Preserve the private image and raw OCR for persistence retry.
       }
-      setError(
-        latest.rawText
-          ? 'OCR ran, but its result could not be saved. The image is safe; retry to save it.'
-          : 'OCR could not read this image. Your original is safe; retry or enter the text manually.',
-      );
-    } finally {
-      activeOcrId.current = null;
-      setCapture(isCaptureDeleted(latest.id) ? null : latest);
-      setBusy(false);
-      setOcrSettled((value) => value + 1);
-    }
+      context.error(latest.rawText
+        ? 'OCR ran, but its result could not be saved. The image is safe; retry to save it.'
+        : 'OCR could not read this image. Your original is safe; retry or enter the text manually.');
+    } finally { context.show(latest); }
+  }, [flushDraft]);
+
+  const startNewCapture = useCallback(async () => {
+    await run('new', async (context) => {
+      try {
+        await flushDraft();
+        context.show(null);
+        context.error(null);
+        context.notice(null);
+        setShowCamera(false);
+        router.setParams({ captureId: undefined, fresh: undefined });
+      } catch {
+        context.error('The current capture could not be saved. Keep this screen open and retry.');
+        // Consume the failed request instead of immediately retrying on settlement.
+        router.setParams({ fresh: undefined });
+      }
+    });
+  }, [run, flushDraft]);
+
+  useEffect(() => {
+    if (!resumeId || params.fresh || currentCapture.current?.id === resumeId || activeOperation.current) return;
+    let active = true;
+    void run('resume', async (context) => {
+      try {
+        await flushDraft();
+        const stored = await loadCaptureById(resumeId);
+        const record = stored?.status === 'processing' ? markCaptureOcrFailed(stored) : stored;
+        if (record && record !== stored) {
+          try { await context.persist(record); } catch {
+            // Preserve the restored image and draft so OCR can be retried.
+          }
+        }
+        if (!active) return;
+        setShowCamera(false);
+        context.show(record);
+        context.error(record?.status === 'failed'
+          ? 'OCR could not read this image. The original is still safe; retry or enter the text manually.'
+          : record ? null : 'This capture could not be found. The original may have been removed from this device.');
+        context.notice(record?.status === 'selecting' ? 'Reading your restored photo…'
+          : record ? 'Original capture restored. Retry OCR or continue editing the text.' : null);
+        if (!record) router.setParams({ captureId: undefined });
+        if (record?.status === 'selecting' && !record.correctedText.trim()) await recognizeRecord(record, context);
+      } catch {
+        if (!active) return;
+        router.setParams({ captureId: currentCapture.current?.id });
+        context.error('The capture could not be switched. Your current edits are still shown; open the other capture again to retry.');
+      }
+    });
+    return () => { active = false; };
+  }, [resumeId, params.fresh, settled, currentCapture, activeOperation, run, flushDraft, recognizeRecord]);
+
+  useEffect(() => {
+    if (params.fresh && !activeOperation.current) void startNewCapture();
+  }, [params.fresh, settled, activeOperation, startNewCapture]);
+
+  async function importAsset(asset: ImagePicker.ImagePickerAsset, source: CaptureSource, context: OperationContext) {
+    const id = newId();
+    const directory = new Directory(Paths.document, 'captures');
+    directory.create({ idempotent: true, intermediates: true });
+    const storedFile = new File(directory, `${id}.${imageExtension(asset)}`);
+    await new File(asset.uri).copy(storedFile);
+    const record: CaptureRecord = {
+      id, createdAt: new Date().toISOString(), language: 'ja', source, imageUri: storedFile.uri,
+      imageMetadata: { assetId: asset.assetId ?? null, fileName: asset.fileName ?? null,
+        fileSize: asset.fileSize ?? null, mimeType: asset.mimeType ?? null, width: asset.width, height: asset.height },
+      ocrBounds: null, rawText: '', regions: [], correctedText: '', selectedRegionId: null,
+      joinedWithoutBreaks: false, status: 'selecting', savedAt: null, sentenceTranslation: null,
+      analysis: null, analysisReview: {},
+    };
+    context.show(record);
+    await context.persist(record);
+    setShowCamera(false);
+    await recognizeRecord(record, context);
   }
 
   async function chooseImage(source: CaptureSource) {
-    if (source === 'camera') {
-      setShowCamera(true);
-      return;
-    }
-    setBusy(true);
-    setError(null);
-    setNotice(null);
-    try {
-      const result = await ImagePicker.launchImageLibraryAsync({
-        mediaTypes: ['images'], allowsEditing: false, quality: 1, exif: false,
-      });
-      if (!result.canceled) await importImageAsset(result.assets[0], source);
-    } catch {
-      setError('The photo could not be opened. Choose another image and try again.');
-    } finally {
-      setBusy(false);
-    }
+    if (source === 'camera') { if (!activeOperation.current) setShowCamera(true); return; }
+    await run('import', async (context) => {
+      context.error(null);
+      context.notice(null);
+      try {
+        await flushDraft();
+        const result = await ImagePicker.launchImageLibraryAsync({ mediaTypes: ['images'], allowsEditing: false, quality: 1, exif: false });
+        if (!result.canceled) await importAsset(result.assets[0], source, context);
+      } catch { context.error('The photo could not be opened or saved. Choose another image and try again.'); }
+    });
   }
 
-  async function importImageAsset(asset: ImagePicker.ImagePickerAsset, source: CaptureSource) {
-    setBusy(true);
-    setError(null);
-    setNotice(null);
-    try {
-      const id = newId();
-      const directory = new Directory(Paths.document, 'captures');
-      directory.create({ idempotent: true, intermediates: true });
-      const storedFile = new File(directory, `${id}.${imageExtension(asset)}`);
-      await new File(asset.uri).copy(storedFile);
-
-      const record: CaptureRecord = {
-        id,
-        createdAt: new Date().toISOString(),
-        language: 'ja',
-        source,
-        imageUri: storedFile.uri,
-        imageMetadata: {
-          assetId: asset.assetId ?? null,
-          fileName: asset.fileName ?? null,
-          fileSize: asset.fileSize ?? null,
-          mimeType: asset.mimeType ?? null,
-          width: asset.width,
-          height: asset.height,
-        },
-        ocrBounds: null,
-        rawText: '',
-        regions: [],
-        correctedText: '',
-        selectedRegionId: null,
-        joinedWithoutBreaks: false,
-        status: 'selecting',
-        savedAt: null,
-        sentenceTranslation: null,
-        analysis: null,
-        analysisReview: {},
-      };
-      setCapture(record);
-      await saveCapture(record);
-      setShowCamera(false);
-      await recognize(record);
-    } catch (error) {
-      setError('The capture could not be saved. Your original photo is unchanged; try again.');
-      if (source === 'camera') throw error;
-    } finally {
-      setBusy(false);
-    }
+  async function importCameraPhoto(takePhoto: () => Promise<ImagePicker.ImagePickerAsset>) {
+    await run('import', async (context) => {
+      context.error(null);
+      context.notice(null);
+      try { await flushDraft(); await importAsset(await takePhoto(), 'camera', context); }
+      catch (cause) {
+        context.error('The capture could not be saved. Your original photo is unchanged; try again.');
+        throw cause;
+      }
+    });
   }
 
   async function saveSelection(reviewedCapture?: CaptureRecord, group?: TextGroup) {
-    if (!capture) return;
-    const source = reviewedCapture ?? capture;
-    // A row is validated by its own text; the capture-wide selection may be empty (unchecked legacy lines).
-    if (!(group?.text ?? source.correctedText).trim()) {
-      setError('Select a finding or enter some text before saving.');
-      return;
-    }
-    setBusy(true);
-    setError(null);
-    try {
-      await finishDraftSave();
-      const persisted = await loadCaptureById(source.id);
-      if (!persisted || isCaptureDeleted(source.id)) {
-        setCapture(null);
-        setNotice(null);
-        setError('This capture was deleted from OCR Review. Start a new capture to continue.');
+    await run('save', async (context) => {
+      const source = reviewedCapture ?? currentCapture.current;
+      if (!source || source.id !== currentCapture.current?.id) return;
+      if (!(group?.text ?? source.correctedText).trim()) {
+        context.error('Select a finding or enter some text before saving.');
         return;
       }
-      if (group) {
-        const words = await afterCommit(saveTextGroup(source, group));
-        setCapture(isCaptureDeleted(source.id) ? null : source);
-        const remaining = unsavedRows(source, new Map((await loadTextGroups(source.id)).map((item) => [item.id, item.text]))).length;
-        setNotice(savedTextNotice(words, remaining));
-        return;
-      }
-      const latest = mergePersistedAnalysis(source, persisted);
-      // Explicit preview choices take precedence over choices recovered from sentence detail.
-      for (const [index, review] of Object.entries(source.analysisReview)) {
-        if (review !== capture.analysisReview[index]) latest.analysisReview = { ...latest.analysisReview, [index]: review };
-      }
-      const saved = { ...latest, savedAt: latest.savedAt ?? new Date().toISOString() };
-      await saveCapture(saved);
-      setCapture(saved);
-      setNotice('Saved card on this device.');
-      router.push({ pathname: '/sentence/[id]', params: { id: saved.id } });
-    } catch {
-      setError('The correction could not be saved. Please try again.');
-    } finally {
-      setBusy(false);
-    }
+      context.error(null);
+      try {
+        await flushDraft();
+        const persisted = await loadCaptureById(source.id);
+        if (!persisted || isCaptureDeleted(source.id)) {
+          context.show(null);
+          context.notice(null);
+          context.error('This capture was deleted from OCR Review. Start a new capture to continue.');
+          return;
+        }
+        if (group) {
+          const current = currentCapture.current;
+          if (!current || current.id !== source.id || ![...rowGroupsForCapture(current), ...textGroupsForCapture(current)]
+            .some((item) => item.id === group.id && item.text === group.text)) {
+            context.error('This row changed before it could be saved. Review its current text and try again.');
+            return;
+          }
+          const words = await afterCommit(saveTextGroup(current, group));
+          const remaining = unsavedRows(current, new Map((await loadTextGroups(current.id)).map((item) => [item.id, item.text]))).length;
+          context.notice(savedTextNotice(words, remaining));
+        } else {
+          let analysisReview = persisted.analysisReview;
+          if (source.correctedText === persisted.correctedText && source.analysis?.normalizedText === persisted.correctedText) {
+            // Preserve detail-screen choices except those explicitly changed by this preview.
+            for (const [index, review] of Object.entries(source.analysisReview)) {
+              if (review !== currentCapture.current?.analysisReview[index]) analysisReview = { ...analysisReview, [index]: review };
+            }
+            if (analysisReview !== persisted.analysisReview) await saveAnalysisReviewForText(persisted.id, persisted.correctedText, analysisReview);
+          }
+          const saved = { ...persisted, analysisReview, savedAt: persisted.savedAt ?? new Date().toISOString() };
+          await context.persist(saved);
+          context.show(saved);
+          context.notice('Saved card on this device.');
+          router.push({ pathname: '/sentence/[id]', params: { id: saved.id } });
+        }
+      } catch { context.error('The correction could not be saved. Please try again.'); }
+    });
   }
 
   async function saveVocabularyWord(source: CaptureRecord, group: TextGroup, index: number, reading: string): Promise<WordSaveOutcome> {
-    setBusy(true);
-    try {
-      await finishDraftSave();
+    return await run('save', async () => {
+      await flushDraft();
       const latest = currentCapture.current;
       if (!latest || latest.id !== source.id || ![...rowGroupsForCapture(latest), ...textGroupsForCapture(latest)].some((item) => item.id === group.id && item.text === group.text)) return null;
-      // The word and its parent row are saved in one transaction.
-      return await afterCommit(addWordCard(latest, index, reading, group));
-    } finally { setBusy(false); }
+      return afterCommit(addWordCard(latest, index, reading, group));
+    }) ?? null;
   }
 
-  async function startNewCapture() {
-    if (activeOcrId.current) return;
-    const previous = currentCapture.current;
-    setBusy(true);
-    if (previous) {
-      try {
-        await finishDraftSave();
-        const latest = mergePersistedAnalysis(previous, await loadCaptureById(previous.id));
-        await saveCapture(latest);
-      } catch {
-        setBusy(false);
-        setError('The current capture could not be saved. Keep this screen open and retry.');
-        return;
-      }
-    }
-    setCapture(null);
-    setError(null);
-    setNotice(null);
-    setBusy(false);
-    router.setParams({ captureId: undefined, fresh: undefined });
-  }
-
-  if (showCamera) return <CameraCapture onPhoto={(asset) => importImageAsset(asset, 'camera')} onClose={() => setShowCamera(false)} />;
+  if (showCamera) return <CameraCapture onPhoto={importCameraPhoto} onClose={() => setShowCamera(false)} />;
 
   return (
     <SafeAreaView style={styles.screen} edges={['top']}>
@@ -331,36 +243,15 @@ export default function App() {
         <CaptureReview
           initialGroupId={Array.isArray(params.groupId) ? params.groupId[0] : params.groupId}
           key={`${capture.id}:${params.groupId ?? ''}`}
-          capture={capture}
-          busy={busy}
-          error={error}
-          notice={notice}
-          onChange={setCapture}
-          onClearNotice={() => setNotice(null)}
+          capture={capture} busy={busy} error={error} notice={notice}
+          onChange={updateDraft} onClearNotice={clearNotice}
           onNewCapture={() => void startNewCapture()}
-          onRetry={() => void recognize(capture)}
-          onPersistOcrArea={(record) => {
-            const write = pendingDraftSave.current.catch(() => undefined).then(async () => {
-              const latest = mergePersistedAnalysis(record, await loadCaptureById(record.id));
-              latest.sentenceTranslation = record.sentenceTranslation ?? latest.sentenceTranslation;
-              await saveCapture(latest);
-            });
-            pendingDraftSave.current = write;
-            void write.catch(() => setError('The draft could not be saved. The original photo is still safe; keep this screen open and retry saving.'));
-          }}
-          onSave={(reviewedCapture, group) => void saveSelection(reviewedCapture, group)}
+          onRetry={() => void run('ocr', (context) => recognizeRecord(currentCapture.current ?? capture, context))}
+          onSave={(record, group) => void saveSelection(record, group)}
           onSaveWord={saveVocabularyWord}
-          navHidden={navHidden}
-          onToggleNav={() => setNavHidden((hidden) => !hidden)}
+          navHidden={navHidden} onToggleNav={() => setNavHidden((hidden) => !hidden)}
         />
-      ) : (
-        <CaptureHome
-          busy={busy}
-          error={error}
-          notice={notice}
-          onChoose={(source) => void chooseImage(source)}
-        />
-      )}
+      ) : <CaptureHome busy={busy} error={error} notice={notice} onChoose={(source) => void chooseImage(source)} />}
     </SafeAreaView>
   );
 }

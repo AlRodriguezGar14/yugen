@@ -29,7 +29,6 @@ export default function CaptureReview({
   onClearNotice,
   onNewCapture,
   onRetry,
-  onPersistOcrArea,
   onSave,
   onSaveWord,
   initialGroupId,
@@ -45,7 +44,6 @@ export default function CaptureReview({
   onClearNotice: () => void;
   onNewCapture: () => void;
   onRetry: () => void;
-  onPersistOcrArea: (capture: CaptureRecord) => void;
   onSave: (capture: CaptureRecord, group?: TextGroup) => void;
   onSaveWord?: (capture: CaptureRecord, group: TextGroup, index: number, reading: string) => Promise<WordSaveOutcome>;
   navHidden?: boolean;
@@ -114,38 +112,6 @@ export default function CaptureReview({
     };
   }, []);
 
-  // Load readings for every row and block once per exact text.
-  const textsKey = JSON.stringify([...new Set([...rows, ...blocks].map((group) => group.text).filter((text) => text.trim()))]);
-  useEffect(() => {
-    let active = true;
-    const texts = JSON.parse(textsKey) as string[];
-    Promise.resolve().then(async () => {
-      // Typing in a row edits its text on every keystroke; analyze once it settles.
-      await new Promise((resolve) => setTimeout(resolve, 300));
-      for (const text of texts) {
-        if (!active) return;
-        if (analysesRef.current[text]) continue;
-        try {
-          const analysis = await requestJapaneseAnalysis({ contractVersion: ANALYSIS_CONTRACT_VERSION, language: capture.language, text });
-          // Readings stay valid for their exact text even if the rows changed meanwhile.
-          setAnalyses((current) => ({ ...current, [text]: analysis }));
-        } catch (cause) {
-          console.warn('Yugen readings failed', cause);
-          const message = analysisFailureMessage(cause);
-          if (!isConnectivityFailure(cause)) {
-            // One rejected row (too long, invalid) must not hide the readings of the others.
-            if (active) setAnalysisErrors((current) => ({ ...current, [text]: message }));
-            continue;
-          }
-          // An unreachable service fails every row alike; report it on each instead of waiting out every timeout.
-          if (active) setAnalysisErrors(Object.fromEntries(texts.filter((item) => !analysesRef.current[item]).map((item) => [item, message])));
-          return;
-        }
-      }
-    });
-    return () => { active = false; };
-  }, [capture.language, textsKey, analysisAttempt]);
-
   const imageFit = containFit(previewFrame, { width: capture.imageMetadata.displayWidth ?? displayImage.width, height: capture.imageMetadata.displayHeight ?? displayImage.height });
   const excluded = capture.regions.filter((region) => region.review?.excluded);
   // Focused row first, then rows with real Japanese (kanji or 2+ kana), each group in photo order; LINE n keeps provenance.
@@ -157,6 +123,66 @@ export default function CaptureReview({
   const savedRowCount = rows.filter((row) => row.text.trim() && !unsavedIds.has(row.id)).length;
   const units = [...paragraphs, ...rows.filter((row) => !paragraphs.some((block) => block.regionIds.includes(row.regionIds[0])))]
     .sort((left, right) => rank(left) - rank(right));
+  // Paragraphs lead the screen. Their hidden lines need readings only when expanded.
+  const visibleStudyGroups = [
+    ...units.filter((group) => paragraphs.includes(group)),
+    ...units.filter((group) => !paragraphs.includes(group)),
+    ...paragraphs.filter((group) => openParagraphs.has(group.id)).flatMap(linesOf),
+  ];
+  const textsKey = JSON.stringify([...new Set(visibleStudyGroups.map((group) => group.text).filter((text) => text.trim()))]);
+  const analysisRequests = useRef(new Map<string, Promise<AnalysisResponse>>());
+  const mounted = useRef(false);
+  useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
+
+  useEffect(() => {
+    let active = true;
+    let disconnected = false;
+    let next = 0;
+    const texts = JSON.parse(textsKey) as string[];
+    async function worker() {
+      while (active && !disconnected && next < texts.length) {
+        const text = texts[next++];
+        if (analysesRef.current[text]) continue;
+        // Keep the same two-request limit when typing or expanding lines replaces this effect's queue.
+        while (active && analysisRequests.current.size >= 2 && !analysisRequests.current.has(text)) {
+          await Promise.race(analysisRequests.current.values()).catch(() => undefined);
+        }
+        if (!active || disconnected) return;
+        let request = analysisRequests.current.get(text);
+        if (!request) {
+          request = requestJapaneseAnalysis({ contractVersion: ANALYSIS_CONTRACT_VERSION, language: capture.language, text })
+            .then((analysis) => {
+              if (mounted.current) {
+                // Cache only under the requested exact text, including results whose row was edited meanwhile.
+                analysesRef.current = { ...analysesRef.current, [text]: analysis };
+                setAnalyses((current) => ({ ...current, [text]: analysis }));
+                setAnalysisErrors((current) => { const remaining = { ...current }; delete remaining[text]; return remaining; });
+              }
+              return analysis;
+            })
+            .finally(() => { analysisRequests.current.delete(text); });
+          analysisRequests.current.set(text, request);
+        }
+        try {
+          await request;
+        } catch (cause) {
+          if (!active) return;
+          console.warn('Yugen readings failed', cause);
+          const message = analysisFailureMessage(cause);
+          if (isConnectivityFailure(cause)) {
+            disconnected = true;
+            setAnalysisErrors((current) => ({ ...current, ...Object.fromEntries(texts.filter((item) => !analysesRef.current[item]).map((item) => [item, message])) }));
+          } else {
+            setAnalysisErrors((current) => ({ ...current, [text]: message }));
+          }
+        }
+      }
+    }
+    // A correction changes on each keystroke; wait until typing settles before starting its lookup.
+    const timer = setTimeout(() => { void Promise.all([worker(), worker()]); }, 300);
+    return () => { active = false; clearTimeout(timer); };
+  }, [capture.language, textsKey, analysisAttempt]);
+
   const noRecognizedRows = !capture.regions.some((region) => !region.review?.excluded && (region.text.trim() || region.review?.correctedText?.trim()));
 
   function applyEdit(record: CaptureRecord) {
@@ -193,7 +219,6 @@ export default function CaptureReview({
     setEditingRowId(null);
     const updated = excludeRegion(capture, regionId);
     applyEdit(updated);
-    onPersistOcrArea(updated);
     setRemoved({ regionId, text: group.text, saved: savedGroupTexts[group.id] !== undefined });
     onClearNotice();
   }
@@ -202,7 +227,6 @@ export default function CaptureReview({
     if (!removed) return;
     const restored = restoreCaptureRegion(currentCapture.current, removed.regionId);
     applyEdit(restored);
-    onPersistOcrArea(restored);
     setRemoved(null);
   }
 
@@ -395,7 +419,6 @@ export default function CaptureReview({
     setBrushPoint(null);
     if (stroke?.changed) {
       setUndoHistory((history) => [...history, stroke.snapshot]);
-      onPersistOcrArea(currentCapture.current);
     }
   }
 
@@ -404,7 +427,6 @@ export default function CaptureReview({
     if (!previous) return;
     currentCapture.current = previous;
     onChange(previous);
-    onPersistOcrArea(previous);
     setUndoHistory((history) => history.slice(0, -1));
     onClearNotice();
   }

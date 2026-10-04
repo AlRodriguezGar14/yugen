@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { useFocusEffect } from 'expo-router';
 import { StatusBar } from 'expo-status-bar';
 import { SafeAreaView } from 'react-native-safe-area-context';
@@ -7,9 +7,11 @@ import { ActivityIndicator, AppState, Image, Linking, Pressable, StyleSheet, Tex
 import { Camera, useCameraDevice, useCameraPermission, usePhotoOutput } from 'react-native-vision-camera';
 import { colors } from '../theme';
 
+type PhotoJob = { status: 'idle' | 'capturing' | 'handing-off' } | { status: 'failed'; message: string };
+
 /** A single shutter action hands the photo directly to the capture/OCR flow. */
 export default function CameraCapture({ onPhoto, onClose }: {
-  onPhoto: (asset: ImagePickerAsset) => Promise<void>;
+  onPhoto: (takePhoto: () => Promise<ImagePickerAsset>) => Promise<void>;
   onClose: () => void;
 }) {
   const device = useCameraDevice('back');
@@ -18,47 +20,72 @@ export default function CameraCapture({ onPhoto, onClose }: {
   const outputs = useMemo(() => [photoOutput], [photoOutput]);
   const [focused, setFocused] = useState(false);
   const [appState, setAppState] = useState(AppState.currentState);
-  const [ready, setReady] = useState(false);
-  const [busy, setBusy] = useState(false);
+  const [preview, setPreview] = useState<'starting' | 'ready' | 'unavailable'>('starting');
+  const [photo, setPhoto] = useState<PhotoJob>({ status: 'idle' });
   const [error, setError] = useState<string | null>(null);
-  const takingPhoto = useRef(false);
+  const takingPhoto = useRef<object | null>(null);
+  const mounted = useRef(true);
+  const busy = photo.status === 'capturing' || photo.status === 'handing-off';
+  const active = focused && appState === 'active' && permission.hasPermission && !!device;
+  const canTakePhoto = active && preview === 'ready' && !busy;
+  const eligibility = useRef(canTakePhoto);
+  useLayoutEffect(() => { eligibility.current = canTakePhoto; }, [canTakePhoto]);
+
+  useEffect(() => {
+    mounted.current = true;
+    return () => { mounted.current = false; eligibility.current = false; };
+  }, []);
 
   useFocusEffect(useCallback(() => {
     setFocused(true);
-    return () => { setFocused(false); setReady(false); };
+    return () => { eligibility.current = false; setFocused(false); setPreview('starting'); };
   }, []));
 
   useEffect(() => {
-    const subscription = AppState.addEventListener('change', setAppState);
+    const subscription = AppState.addEventListener('change', (state) => {
+      if (state !== 'active') { eligibility.current = false; setPreview('starting'); }
+      setAppState(state);
+    });
     return () => subscription.remove();
   }, []);
 
   const { canRequestPermission, requestPermission } = permission;
   useEffect(() => {
+    let active = true;
     if (canRequestPermission) {
-      void requestPermission().catch(() => setError('Camera access could not be requested. You can choose a photo instead.'));
+      void requestPermission().catch(() => {
+        if (active) setError('Camera access could not be requested. You can choose a photo instead.');
+      });
     }
+    return () => { active = false; };
   }, [canRequestPermission, requestPermission]);
 
   async function takePhoto() {
-    if (!ready || takingPhoto.current) return;
-    takingPhoto.current = true;
-    setBusy(true);
+    if (!eligibility.current || takingPhoto.current) return;
+    const job = {};
+    takingPhoto.current = job;
+    eligibility.current = false;
+    setPhoto({ status: 'capturing' });
     setError(null);
     try {
-      // A request only: VisionCamera documents that the OS may still enforce the shutter sound (e.g. regional rules).
-      const { filePath } = await photoOutput.capturePhotoToFile({ enableShutterSound: false }, {});
-      const uri = `file://${filePath}`;
-      // Use the same upright dimensions that React Native displays, including EXIF rotation.
-      const dimensions = await new Promise<{ width: number; height: number }>((resolve, reject) => {
-        Image.getSize(uri, (width, height) => resolve({ width, height }), reject);
+      // The parent owns the job before native capture starts, including deferred New/resume requests.
+      await onPhoto(async () => {
+        // Some operating systems enforce the shutter sound regardless of this request.
+        const { filePath } = await photoOutput.capturePhotoToFile({ enableShutterSound: false }, {});
+        const uri = `file://${filePath}`;
+        const dimensions = await new Promise<{ width: number; height: number }>((resolve, reject) => {
+          Image.getSize(uri, (width, height) => resolve({ width, height }), reject);
+        });
+        if (mounted.current && takingPhoto.current === job) setPhoto({ status: 'handing-off' });
+        return { uri, ...dimensions, fileName: filePath.split('/').pop(), mimeType: 'image/jpeg', type: 'image' };
       });
-      await onPhoto({ uri, ...dimensions, fileName: filePath.split('/').pop(), mimeType: 'image/jpeg', type: 'image' });
+      if (mounted.current && takingPhoto.current === job) setPhoto({ status: 'idle' });
     } catch {
-      setError('The photo could not be captured. Try the shutter again, or choose a photo from your Library.');
+      if (mounted.current && takingPhoto.current === job) {
+        setPhoto({ status: 'failed', message: 'The photo could not be captured or saved. Try again, or choose a photo from your Library.' });
+      }
     } finally {
-      takingPhoto.current = false;
-      setBusy(false);
+      if (takingPhoto.current === job) takingPhoto.current = null;
     }
   }
 
@@ -77,12 +104,14 @@ export default function CameraCapture({ onPhoto, onClose }: {
             style={StyleSheet.absoluteFill}
             device={device}
             outputs={outputs}
-            isActive={focused && appState === 'active'}
+            isActive={active}
             enableNativeTapToFocusGesture
             enableNativeZoomGesture
-            onPreviewStarted={() => setReady(true)}
-            onStopped={() => setReady(false)}
-            onError={() => { setReady(false); setError('The camera is unavailable. Go back and choose a photo, or reopen the camera.'); }}
+            onPreviewStarted={() => { setPreview('ready'); setError(null); }}
+            onPreviewStopped={() => { eligibility.current = false; setPreview('starting'); }}
+            onStopped={() => { eligibility.current = false; setPreview('starting'); }}
+            onInterruptionStarted={() => { eligibility.current = false; setPreview('starting'); }}
+            onError={() => { eligibility.current = false; setPreview('unavailable'); setError('The camera is unavailable. Go back and choose a photo, or reopen the camera.'); }}
           />
         ) : (
           <View style={styles.permission}>
@@ -99,13 +128,14 @@ export default function CameraCapture({ onPhoto, onClose }: {
       <View style={styles.footer}>
         <Text style={styles.hint}>Point at the text. Tap once to read it.</Text>
         {error && <Text accessibilityLiveRegion="polite" style={styles.error}>{error}</Text>}
+        {photo.status === 'failed' && <Text accessibilityLiveRegion="polite" style={styles.error}>{photo.message}</Text>}
         <Pressable
           accessibilityRole="button"
           accessibilityLabel="Take photo and read Japanese text"
-          accessibilityState={{ disabled: !ready || busy, busy }}
-          disabled={!ready || busy}
+          accessibilityState={{ disabled: !canTakePhoto, busy }}
+          disabled={!canTakePhoto}
           onPress={() => void takePhoto()}
-          style={({ pressed }) => [styles.shutter, pressed && styles.pressed, (!ready || busy) && styles.disabled]}
+          style={({ pressed }) => [styles.shutter, pressed && styles.pressed, !canTakePhoto && styles.disabled]}
         >
           {busy ? <ActivityIndicator color={colors.ink} /> : <View style={styles.shutterCenter} />}
         </Pressable>
