@@ -2,10 +2,10 @@ import { useCallback, useState } from 'react';
 import { router, useFocusEffect } from 'expo-router';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { ActivityIndicator, Alert, Image, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
-import { deleteCapture, loadOcrReviewCaptures } from '../../capture/store';
-import { afterCommit } from '../../capture/studyChanges';
-import type { CaptureRecord } from '../../capture/types';
-import { colors } from '../../theme';
+import { deleteCapture, loadOcrReviewCaptures } from '@/capture/store';
+import { afterCommit } from '@/capture/studyChanges';
+import type { CaptureRecord } from '@/capture/types';
+import { colors } from '@/theme';
 
 function statusText(capture: CaptureRecord): string {
   switch (capture.status) {

@@ -1,5 +1,5 @@
 import { StyleSheet } from 'react-native';
-import { colors } from '../theme';
+import { colors } from '@/theme';
 
 export const styles = StyleSheet.create({
   // Large text wraps header actions onto their own line(s) instead of pushing them off-screen.

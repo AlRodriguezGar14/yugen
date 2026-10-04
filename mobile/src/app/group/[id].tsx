@@ -2,13 +2,13 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { router, useFocusEffect, useLocalSearchParams } from 'expo-router';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { ActivityIndicator, Pressable, ScrollView, Text, View } from 'react-native';
-import { addWordCard, loadCaptureById, loadTextEntryForGroup, loadTextGroup, saveGroupAnalysisForText } from '../../capture/store';
-import { analysisFailureMessage, readingToSave, requestJapaneseAnalysis } from '../../capture/analysis';
-import type { CaptureRecord, TextGroup } from '../../capture/types';
-import AnalysisReadingsAndMeanings, { wordSaveResultFor } from '../../capture/CaptureAnalysisPreview';
-import SourcePhoto from '../../capture/SourcePhoto';
-import { afterCommit, onStudyChange } from '../../capture/studyChanges';
-import { styles } from '../../capture/uiStyles';
+import { addWordCard, loadCaptureById, loadTextEntryForGroup, loadTextGroup, saveGroupAnalysisForText } from '@/capture/store';
+import { analysisFailureMessage, readingToSave, requestJapaneseAnalysis } from '@/capture/analysis';
+import type { CaptureRecord, TextGroup } from '@/capture/types';
+import AnalysisReadingsAndMeanings, { wordSaveResultFor } from '@/capture/CaptureAnalysisPreview';
+import SourcePhoto from '@/capture/SourcePhoto';
+import { afterCommit, onStudyChange } from '@/capture/studyChanges';
+import { styles } from '@/capture/uiStyles';
 
 export default function SavedGroupScreen() {
   const { id } = useLocalSearchParams<{ id: string }>();

@@ -2,12 +2,12 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { router, useFocusEffect } from 'expo-router';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { ActivityIndicator, Alert, FlatList, Image, Pressable, StyleSheet, Text, TextInput, View } from 'react-native';
-import { deleteCapture, deleteTextGroup } from '../../capture/store';
-import { loadLibraryPage, type LibraryCollection, type LibraryCursor, type LibraryEntry, type LibraryItem, type LibraryPhoto } from '../../capture/libraryQueries';
-import { confirmEntryDeletion } from '../../capture/entryActions';
-import StatusMessage from '../../capture/StatusMessage';
-import { afterCommit, onStudyChange } from '../../capture/studyChanges';
-import { colors } from '../../theme';
+import { deleteCapture, deleteTextGroup } from '@/capture/store';
+import { loadLibraryPage, type LibraryCollection, type LibraryCursor, type LibraryEntry, type LibraryItem, type LibraryPhoto } from '@/capture/libraryQueries';
+import { confirmEntryDeletion } from '@/capture/entryActions';
+import StatusMessage from '@/capture/StatusMessage';
+import { afterCommit, onStudyChange } from '@/capture/studyChanges';
+import { colors } from '@/theme';
 
 export default function LibraryScreen() {
   const [collection, setCollection] = useState<LibraryCollection>('texts');

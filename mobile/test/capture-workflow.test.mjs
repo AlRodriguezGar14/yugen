@@ -323,7 +323,7 @@ test('shipped study preview shows local readings and words before optional AI, i
     react: { useRef: (initial) => ({ current: initial }), useEffect: () => {}, useCallback: (fn) => fn, useState: (initial) => [typeof initial === 'function' ? initial() : initial, () => {}] },
     'react/jsx-runtime': { jsx, jsxs: jsx },
     'react-native': {}, './analysis': analysisHelpers, './translation': translationHelpers,
-    '../theme': { colors: {} }, './uiStyles': { styles: {} },
+    '@/theme': { colors: {} }, './uiStyles': { styles: {} },
   };
   const compiled = ts.transpileModule(previewSource, { compilerOptions: { module: ts.ModuleKind.CommonJS, jsx: ts.JsxEmit.ReactJSX } }).outputText;
   const exports = {};
@@ -381,9 +381,9 @@ test('shipped study preview shows local readings and words before optional AI, i
     ...modules,
     'expo-router': { router: { push() {}, back() {} }, useLocalSearchParams: () => ({ id: 'sentence:test' }), useFocusEffect: () => {} },
     'react-native-safe-area-context': {}, 'react-native': { StyleSheet: { create: (value) => value }, Platform: { OS: 'android' } },
-    '../../capture/store': {}, '../../capture/analysis': analysisHelpers, '../../capture/types': {},
-    '../../capture/studyCards': studyExports, '../../capture/CaptureAnalysisPreview': exports,
-    '../../theme': { colors: {} },
+    '@/capture/store': {}, '@/capture/analysis': analysisHelpers, '@/capture/types': {},
+    '@/capture/studyCards': studyExports, '@/capture/CaptureAnalysisPreview': exports,
+    '@/theme': { colors: {} },
   };
   cardModules['react/jsx-runtime'] = { jsx: (type, value) => typeof type === 'function' ? type(value) : value, jsxs: (type, value) => typeof type === 'function' ? type(value) : value };
   const cardExports = {};
@@ -632,7 +632,7 @@ test('shipped capture review shows every row with readings and its own actions, 
     }, exports);
     return exports;
   };
-  const shared = { react, 'react/jsx-runtime': { jsx: render, jsxs: render }, './analysis': analysisHelpers, '../theme': { colors: {} }, './uiStyles': { styles: {} } };
+  const shared = { react, 'react/jsx-runtime': { jsx: render, jsxs: render }, './analysis': analysisHelpers, '@/theme': { colors: {} }, './uiStyles': { styles: {} } };
   const preview = load(await readFile(new URL('../src/capture/CaptureAnalysisPreview.tsx', import.meta.url), 'utf8'),
     { ...shared, 'react-native': {}, './translation': translationHelpers });
   let analyze = async () => { throw new Error('Unexpected readings request'); };
@@ -781,13 +781,13 @@ test('a focused Library reloads when a card mutation commits after the user went
         type: 'FlatList', children: [ListHeaderComponent, data.length ? data.map((item, index) => renderItem({ item, index })) : ListEmptyComponent, ListFooterComponent],
       }),
     },
-    '../../capture/store': {}, '../../capture/entryActions': {},
-    '../../capture/libraryQueries': { loadLibraryPage: async (collection) => {
+    '@/capture/store': {}, '@/capture/entryActions': {},
+    '@/capture/libraryQueries': { loadLibraryPage: async (collection) => {
       const items = persisted.filter((card) => card.kind === (collection === 'vocabulary' ? 'word' : 'sentence'))
         .map((card) => ({ ...card, collection, imageUri: null, meaning: '', hasPractice: 0 }));
       return { items, total: items.length, nextCursor: null };
     } },
-    '../../capture/StatusMessage': { default: () => null }, '../../capture/studyChanges': changes, '../../theme': { colors: {} },
+    '@/capture/StatusMessage': { default: () => null }, '@/capture/studyChanges': changes, '@/theme': { colors: {} },
   });
   await frame();
   // Four tabs at 350pt and 1.3× text: each sizes to its label and the row wraps, so labels never overlap.
@@ -812,11 +812,11 @@ test('practice and entry screens stay current across navigation round trips', as
   const changes = await import('../src/capture/studyChanges.ts');
   const shared = {
     'react-native-safe-area-context': {}, 'react-native': { StyleSheet: { create: (value) => value }, Platform: { OS: 'android' }, Alert: {} },
-    '../../capture/StatusMessage': { default: () => null }, '../../capture/studyChanges': changes, '../../theme': { colors: {} },
+    '@/capture/StatusMessage': { default: () => null }, '@/capture/studyChanges': changes, '@/theme': { colors: {} },
   };
   // Practice → Open entry → edit the meaning → Back: the still-mounted practice card shows the new answer, hidden first.
   let personal = 'old meaning';
-  const practiceScreen = await mountScreen('../src/app/practice/[id].tsx', { ...shared, '../../capture/SourcePhoto': { default: () => null }, '../../capture/types': {}, '../../capture/store': {
+  const practiceScreen = await mountScreen('../src/app/practice/[id].tsx', { ...shared, '@/capture/SourcePhoto': { default: () => null }, '@/capture/types': {}, '@/capture/store': {
     loadPracticeCard: async () => ({ id: 'practice:1', entryId: 'word:1', createdAt: '2026-10-04',
       answer: { kind: 'word', prompt: '鶏肉', reading: 'とりにく', dictionaryMeaning: 'chicken meat', personal, sourceText: '鶏肉' } }),
   } }, { id: 'practice:1' });
@@ -833,9 +833,9 @@ test('practice and entry screens stay current across navigation round trips', as
   const entry = { id: 'word:1', captureId: fixture.id, kind: 'word', tokenIndex: 0, lemma: '鶏肉', reading: 'とりにく', sourceText: fixture.correctedText,
     createdAt: '2026-10-04', groupId: null, wordSnapshot: { ...fixture.analysis.tokens[0], surface: '鶏肉', reading: 'とりにく' }, personalMeaning: null, sourceRegions: null };
   const entryScreen = await mountScreen('../src/app/card/[id].tsx', { ...shared,
-    '../../capture/store': { loadStudyCard: async () => entry, loadCaptureById: async () => fixture, loadTextGroup: async () => null, loadPracticeCardForEntry: async () => practice, WordConflictError: Error },
-    '../../capture/entryActions': {}, '../../capture/analysis': analysisHelpers, '../../capture/studyCards': { studyDataForCard: () => ({ analysis: null, choices: {} }) },
-    '../../capture/types': {}, '../../capture/CaptureAnalysisPreview': { default: () => null }, '../../capture/SourcePhoto': { default: () => null },
+    '@/capture/store': { loadStudyCard: async () => entry, loadCaptureById: async () => fixture, loadTextGroup: async () => null, loadPracticeCardForEntry: async () => practice, WordConflictError: Error },
+    '@/capture/entryActions': {}, '@/capture/analysis': analysisHelpers, '@/capture/studyCards': { studyDataForCard: () => ({ analysis: null, choices: {} }) },
+    '@/capture/types': {}, '@/capture/CaptureAnalysisPreview': { default: () => null }, '@/capture/SourcePhoto': { default: () => null },
   }, { id: 'word:1', mode: 'dictionary' });
   await entryScreen.frame();
   assert.match(await entryScreen.frame(), /Open practice card/);
@@ -855,11 +855,11 @@ test('a legacy saved group links to its real text entry and stays current after 
   let currentGroup = legacyGroup;
   const groupScreen = await mountScreen('../src/app/group/[id].tsx', {
     'react-native-safe-area-context': {}, 'react-native': {},
-    '../../capture/store': { loadTextGroup: async () => currentGroup, loadCaptureById: async () => fixture,
+    '@/capture/store': { loadTextGroup: async () => currentGroup, loadCaptureById: async () => fixture,
       loadTextEntryForGroup: async (groupId) => groupId === legacyGroup.id ? { id: `sentence:${fixture.id}` } : null },
-    '../../capture/analysis': analysisHelpers, '../../capture/types': {}, '../../capture/CaptureAnalysisPreview': { default: () => null },
-    '../../capture/SourcePhoto': { default: () => null }, '../../capture/StatusMessage': { default: () => null },
-    '../../capture/studyChanges': changes, '../../capture/uiStyles': { styles: {} },
+    '@/capture/analysis': analysisHelpers, '@/capture/types': {}, '@/capture/CaptureAnalysisPreview': { default: () => null },
+    '@/capture/SourcePhoto': { default: () => null }, '@/capture/StatusMessage': { default: () => null },
+    '@/capture/studyChanges': changes, '@/capture/uiStyles': { styles: {} },
   }, { id: legacyGroup.id }, { push: (route) => pushed.push(route), back() {}, navigate() {} });
   await groupScreen.frame();
   await groupScreen.press('Edit, translate, delete or practice ›');
@@ -886,9 +886,9 @@ test('a practice card withholds its previous answer while reloading and shows it
   const photos = [];
   const screen = await mountScreen('../src/app/practice/[id].tsx', {
     'react-native-safe-area-context': {}, 'react-native': { StyleSheet: { create: (value) => value }, Alert: {} },
-    '../../capture/StatusMessage': { __esModule: true, default: ({ text }) => text }, '../../capture/studyChanges': changes, '../../theme': { colors: {} },
-    '../../capture/types': {}, '../../capture/SourcePhoto': { __esModule: true, default: ({ regions }) => { photos.push(regions); return `PHOTO WITH ${regions.length} LINES`; } },
-    '../../capture/store': { loadPracticeCard: () => load(), loadCaptureById: async (id) => id === fixture.id ? fixture : null },
+    '@/capture/StatusMessage': { __esModule: true, default: ({ text }) => text }, '@/capture/studyChanges': changes, '@/theme': { colors: {} },
+    '@/capture/types': {}, '@/capture/SourcePhoto': { __esModule: true, default: ({ regions }) => { photos.push(regions); return `PHOTO WITH ${regions.length} LINES`; } },
+    '@/capture/store': { loadPracticeCard: () => load(), loadCaptureById: async (id) => id === fixture.id ? fixture : null },
   }, { id: 'practice:2' });
   const prompt = await screen.frame();
   assert.doesNotMatch(prompt, /Show in photo|PHOTO WITH/, 'The source photo is part of the answer: hidden before Reveal');
@@ -933,7 +933,7 @@ test('capture saved status follows external deletion on commit and return, ignor
   const props = { capture, busy: false, error: null, notice: null, onChange: noop, onClearNotice: noop, onNewCapture: noop, onRetry: noop, onPersistOcrArea: noop, onSave: noop };
   const screen = await mountScreen('../src/capture/CaptureReview.tsx', {
     './analysis': { ...analysisHelpers, requestJapaneseAnalysis: async ({ text }) => ({ contractVersion: 2, language: 'ja', normalizedText: text, tokens: [] }) },
-    './review': review, './geometry': geometry, './types': { ANALYSIS_CONTRACT_VERSION: 2 }, './uiStyles': { styles: {} }, '../theme': { colors: {} },
+    './review': review, './geometry': geometry, './types': { ANALYSIS_CONTRACT_VERSION: 2 }, './uiStyles': { styles: {} }, '@/theme': { colors: {} },
     './CaptureAnalysisPreview': { __esModule: true, default: () => null }, './StatusMessage': { __esModule: true, default: ({ text }) => text },
     './store': { loadTextGroups }, './studyChanges': changes,
     'react-native': { useWindowDimensions: () => ({ width: 350, height: 667 }), Platform: { OS: 'android' }, StyleSheet: { absoluteFill: {} }, Keyboard: { addListener: () => ({ remove() {} }) }, Alert: {} },
@@ -997,7 +997,7 @@ test('Save word shows its own saving, saved, needs-choice and retry state beside
   const props = { text, analysis, busy: false, error: null, choices: {}, translation: null, translationBusy: false, translationError: null,
     onTranslate() {}, onChooseCandidate() {}, onRetry() {}, onSaveWord: (index) => { calls.push(index); return new Promise((resolve) => { respond = resolve; }); } };
   const preview = await mountScreen('../src/capture/CaptureAnalysisPreview.tsx', {
-    'react-native': {}, './analysis': analysisHelpers, './translation': translationHelpers, '../theme': { colors: {} }, './uiStyles': { styles: {} },
+    'react-native': {}, './analysis': analysisHelpers, './translation': translationHelpers, '@/theme': { colors: {} }, './uiStyles': { styles: {} },
   }, {}, undefined, props);
   // Each word's row runs from its own meaning to the next word's meaning.
   const between = (view, from, to) => view.slice(view.indexOf(from), view.indexOf(to, view.indexOf(from)));
@@ -1067,20 +1067,20 @@ test('a saved text entry scopes its in-place choices to the entry and its exact 
   const routeParams = { id: 'sentence:a', mode: 'dictionary' };
   const screen = await mountScreen('../src/app/card/[id].tsx', {
     'react-native-safe-area-context': {}, 'react-native': { StyleSheet: { create: (value) => value }, Platform: { OS: 'android' }, Alert: {} },
-    '../../capture/StatusMessage': { default: () => null }, '../../capture/studyChanges': { afterCommit: (mutation) => mutation, onStudyChange: () => () => {} },
-    '../../theme': { colors: {} }, '../../capture/entryActions': {}, '../../capture/SourcePhoto': { default: () => null },
-    '../../capture/types': { analysisRequestFor: (capture) => ({ contractVersion: 2, language: 'ja', text: capture.correctedText }) },
-    '../../capture/analysis': { ...analysisHelpers, requestJapaneseAnalysis: async ({ text }) => analysisOf(text) },
-    '../../capture/studyCards': { studyDataForCard: (_card, capture) => ({ analysis: capture.analysis, choices: Object.fromEntries(Object.entries(capture.analysisReview)
+    '@/capture/StatusMessage': { default: () => null }, '@/capture/studyChanges': { afterCommit: (mutation) => mutation, onStudyChange: () => () => {} },
+    '@/theme': { colors: {} }, '@/capture/entryActions': {}, '@/capture/SourcePhoto': { default: () => null },
+    '@/capture/types': { analysisRequestFor: (capture) => ({ contractVersion: 2, language: 'ja', text: capture.correctedText }) },
+    '@/capture/analysis': { ...analysisHelpers, requestJapaneseAnalysis: async ({ text }) => analysisOf(text) },
+    '@/capture/studyCards': { studyDataForCard: (_card, capture) => ({ analysis: capture.analysis, choices: Object.fromEntries(Object.entries(capture.analysisReview)
       .flatMap(([index, review]) => review.dictionaryCandidateId ? [[index, review.dictionaryCandidateId]] : [])) }) },
-    '../../capture/store': {
+    '@/capture/store': {
       loadStudyCard: async (id) => entry(id, id === 'sentence:a' ? 'g:a' : 'g:b'), loadCaptureById: async () => fixture, loadTextGroup: async (id) => groups[id] ?? null,
       loadPracticeCardForEntry: async () => null, saveGroupAnalysisForText: async (id, _text, analysis) => { groups[id] = { ...groups[id], analysis }; return true; },
       updateSavedText: async (id, newText) => { groups[id] = { ...groups[id], text: newText, analysis: null, analysisReview: {} }; },
       addWordCard: async (...args) => { saves.push(args); return 'added'; }, WordConflictError: class extends Error {}, EntryDeletedError: class extends Error {},
     },
-    '../../capture/CaptureAnalysisPreview': { __compile: '../src/capture/CaptureAnalysisPreview.tsx', dependencies: {
-      'react-native': {}, './analysis': analysisHelpers, './translation': translationHelpers, '../theme': { colors: {} }, './uiStyles': { styles: {} } } },
+    '@/capture/CaptureAnalysisPreview': { __compile: '../src/capture/CaptureAnalysisPreview.tsx', dependencies: {
+      'react-native': {}, './analysis': analysisHelpers, './translation': translationHelpers, '@/theme': { colors: {} }, './uiStyles': { styles: {} } } },
   }, routeParams);
   const nodes = (node) => Array.isArray(node) ? node.flatMap(nodes) : node && typeof node === 'object' ? [node, ...nodes(node.children)] : [];
   const textOf = (node) => Array.isArray(node) ? node.map(textOf).join(' ') : node && typeof node === 'object' ? textOf(node.children) : typeof node === 'string' ? node : '';

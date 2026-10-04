@@ -1,7 +1,7 @@
 import { router } from 'expo-router';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Linking, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
-import { colors } from '../theme';
+import { colors } from '@/theme';
 
 export default function SourcesScreen() {
   return (

@@ -5,7 +5,7 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import type { ImagePickerAsset } from 'expo-image-picker';
 import { ActivityIndicator, AppState, Image, Linking, Pressable, StyleSheet, Text, View } from 'react-native';
 import { Camera, useCameraDevice, useCameraPermission, usePhotoOutput } from 'react-native-vision-camera';
-import { colors } from '../theme';
+import { colors } from '@/theme';
 
 type PhotoJob = { status: 'idle' | 'capturing' | 'handing-off' } | { status: 'failed'; message: string };
 

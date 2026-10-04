@@ -10,7 +10,7 @@ import { styles } from './uiStyles';
 import StatusMessage from './StatusMessage';
 import { loadTextGroups, type WordSaveOutcome } from './store';
 import { onStudyChange } from './studyChanges';
-import { colors } from '../theme';
+import { colors } from '@/theme';
 
 /** Dictionary choices belong to one exact text of one row or block; editing the text discards them. */
 const reviewKey = (group: TextGroup) => `${group.id}\n${group.text}`;

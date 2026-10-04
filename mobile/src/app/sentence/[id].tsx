@@ -2,12 +2,12 @@ import { useEffect, useRef, useState } from 'react';
 import { router, useLocalSearchParams } from 'expo-router';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { ActivityIndicator, Image, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
-import { analysisBaseUrl, hiraganaReading, isContentToken, wordDisplayForToken, requestJapaneseAnalysis, tokenMeaningForDisplay } from '../../capture/analysis';
-import { updateAnalysisTokenReview } from '../../capture/review';
-import { addWordCard, loadCaptureById, saveAnalysisForText, saveAnalysisReviewForText, saveTranslationForText } from '../../capture/store';
-import { AI_TRANSLATION_ENABLED, contextualMeaningForToken, requestSentenceTranslation, sentenceTranslationFailureMessage, TRANSLATION_CONTRACT_VERSION } from '../../capture/translation';
-import { analysisRequestFor, type AnalysisToken, type CaptureRecord } from '../../capture/types';
-import { colors } from '../../theme';
+import { analysisBaseUrl, hiraganaReading, isContentToken, wordDisplayForToken, requestJapaneseAnalysis, tokenMeaningForDisplay } from '@/capture/analysis';
+import { updateAnalysisTokenReview } from '@/capture/review';
+import { addWordCard, loadCaptureById, saveAnalysisForText, saveAnalysisReviewForText, saveTranslationForText } from '@/capture/store';
+import { AI_TRANSLATION_ENABLED, contextualMeaningForToken, requestSentenceTranslation, sentenceTranslationFailureMessage, TRANSLATION_CONTRACT_VERSION } from '@/capture/translation';
+import { analysisRequestFor, type AnalysisToken, type CaptureRecord } from '@/capture/types';
+import { colors } from '@/theme';
 
 export default function SavedSentenceScreen() {
   const params = useLocalSearchParams<{ id: string }>();

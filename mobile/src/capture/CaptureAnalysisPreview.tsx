@@ -3,7 +3,7 @@ import { ActivityIndicator, Pressable, Text, View } from 'react-native';
 import { alignAnalysisTokensToText, hiraganaReading, isContentToken, wordDisplayForToken, tokenMeaningForDisplay, requestJapaneseAnalysis } from './analysis';
 import { AI_TRANSLATION_ENABLED, contextualMeaningForToken } from './translation';
 import type { AnalysisResponse, SentenceTranslation, KanjiDetail } from './types';
-import { colors } from '../theme';
+import { colors } from '@/theme';
 import { styles } from './uiStyles';
 
 /** The caller's actual outcome of saving one word; shown beside that word. */

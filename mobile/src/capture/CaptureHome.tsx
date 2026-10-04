@@ -1,6 +1,6 @@
 import { ActivityIndicator, Pressable, ScrollView, Text, View } from 'react-native';
 import type { CaptureSource } from './types';
-import { colors } from '../theme';
+import { colors } from '@/theme';
 import { styles } from './uiStyles';
 
 export default function CaptureHome({

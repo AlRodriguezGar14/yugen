@@ -4,17 +4,17 @@ import { StatusBar } from 'expo-status-bar';
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import * as ImagePicker from 'expo-image-picker';
 import { Directory, File, Paths } from 'expo-file-system';
-import { analyzeJapaneseImage } from './src/capture/ocr';
-import CameraCapture from './src/capture/CameraCapture';
-import { markCaptureOcrFailed, rowGroupsForCapture, savedTextNotice, selectRecognizedFindings, textGroupsForCapture, unsavedRows } from './src/capture/review';
-import { isCaptureDeleted, loadCaptureById, saveAnalysisReviewForText, saveTextGroup, addWordCard, loadTextGroups, type WordSaveOutcome } from './src/capture/store';
-import type { CaptureRecord, CaptureSource, TextGroup } from './src/capture/types';
-import CaptureHome from './src/capture/CaptureHome';
-import CaptureReview from './src/capture/CaptureReview';
-import { styles } from './src/capture/uiStyles';
-import { tabBarStyle } from './src/theme';
-import { afterCommit } from './src/capture/studyChanges';
-import { useCaptureSession, type OperationContext } from './src/capture/useCaptureSession';
+import { analyzeJapaneseImage } from '@/capture/ocr';
+import CameraCapture from '@/capture/CameraCapture';
+import { markCaptureOcrFailed, rowGroupsForCapture, savedTextNotice, selectRecognizedFindings, textGroupsForCapture, unsavedRows } from '@/capture/review';
+import { isCaptureDeleted, loadCaptureById, saveAnalysisReviewForText, saveTextGroup, addWordCard, loadTextGroups, type WordSaveOutcome } from '@/capture/store';
+import type { CaptureRecord, CaptureSource, TextGroup } from '@/capture/types';
+import CaptureHome from '@/capture/CaptureHome';
+import CaptureReview from '@/capture/CaptureReview';
+import { styles } from '@/capture/uiStyles';
+import { tabBarStyle } from '@/theme';
+import { afterCommit } from '@/capture/studyChanges';
+import { useCaptureSession, type OperationContext } from '@/capture/useCaptureSession';
 
 function imageExtension(asset: ImagePicker.ImagePickerAsset): string {
   const name = asset.fileName ?? asset.uri.split(/[?#]/)[0];

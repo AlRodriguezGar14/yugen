@@ -2,16 +2,16 @@ import { useCallback, useEffect, useState } from 'react';
 import { router, useFocusEffect, useLocalSearchParams } from 'expo-router';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { ActivityIndicator, KeyboardAvoidingView, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
-import { addWordCard, createPracticeCard, deleteTextGroup, deleteWordCard, enrichWordCardCharacters, loadCaptureById, loadPracticeCardForEntry, loadStudyCard, loadTextGroup, saveAnalysisForText, saveGroupAnalysisForText, updateSavedText, updateWordCard, WordConflictError, EntryDeletedError, type PracticeCard, type StudyCard } from '../../capture/store';
-import { confirmEntryDeletion } from '../../capture/entryActions';
-import StatusMessage from '../../capture/StatusMessage';
-import { afterCommit, onStudyChange } from '../../capture/studyChanges';
-import { requestJapaneseAnalysis, analysisFailureMessage, readingToSave } from '../../capture/analysis';
-import { studyDataForCard } from '../../capture/studyCards';
-import { analysisRequestFor, type CaptureRecord, type TextGroup } from '../../capture/types';
-import AnalysisReadingsAndMeanings, { wordSaveResultFor, type WordSaveResult } from '../../capture/CaptureAnalysisPreview';
-import SourcePhoto from '../../capture/SourcePhoto';
-import { colors } from '../../theme';
+import { addWordCard, createPracticeCard, deleteTextGroup, deleteWordCard, enrichWordCardCharacters, loadCaptureById, loadPracticeCardForEntry, loadStudyCard, loadTextGroup, saveAnalysisForText, saveGroupAnalysisForText, updateSavedText, updateWordCard, WordConflictError, EntryDeletedError, type PracticeCard, type StudyCard } from '@/capture/store';
+import { confirmEntryDeletion } from '@/capture/entryActions';
+import StatusMessage from '@/capture/StatusMessage';
+import { afterCommit, onStudyChange } from '@/capture/studyChanges';
+import { requestJapaneseAnalysis, analysisFailureMessage, readingToSave } from '@/capture/analysis';
+import { studyDataForCard } from '@/capture/studyCards';
+import { analysisRequestFor, type CaptureRecord, type TextGroup } from '@/capture/types';
+import AnalysisReadingsAndMeanings, { wordSaveResultFor, type WordSaveResult } from '@/capture/CaptureAnalysisPreview';
+import SourcePhoto from '@/capture/SourcePhoto';
+import { colors } from '@/theme';
 
 export default function StudyCardScreen() {
   const { id, mode } = useLocalSearchParams<{ id: string; mode?: string }>();

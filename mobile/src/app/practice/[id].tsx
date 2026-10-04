@@ -2,12 +2,12 @@ import { useCallback, useEffect, useState } from 'react';
 import { router, useFocusEffect, useLocalSearchParams } from 'expo-router';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { ActivityIndicator, Alert, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
-import { deletePracticeCard, loadCaptureById, loadPracticeCard, type PracticeCard } from '../../capture/store';
-import SourcePhoto from '../../capture/SourcePhoto';
-import type { CaptureRecord } from '../../capture/types';
-import StatusMessage from '../../capture/StatusMessage';
-import { afterCommit, onStudyChange } from '../../capture/studyChanges';
-import { colors } from '../../theme';
+import { deletePracticeCard, loadCaptureById, loadPracticeCard, type PracticeCard } from '@/capture/store';
+import SourcePhoto from '@/capture/SourcePhoto';
+import type { CaptureRecord } from '@/capture/types';
+import StatusMessage from '@/capture/StatusMessage';
+import { afterCommit, onStudyChange } from '@/capture/studyChanges';
+import { colors } from '@/theme';
 
 /** A recall exercise: the prompt first, the answer only on request. Deleting it never touches its entry. */
 export default function PracticeCardScreen() {
