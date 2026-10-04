@@ -23,6 +23,9 @@ registerHooks({
 const testDirectory = mkdtempSync(join(tmpdir(), 'yugen-store-'));
 const databasePath = join(testDirectory, 'cards.sqlite');
 let sqlite = new DatabaseSync(databasePath);
+let imageExists = true;
+let failImageDelete = false;
+let failSqlDelete = false;
 let failCardWrite = false;
 let failWordWrite = false;
 // Models expo-sqlite natively: withExclusiveTransactionAsync opens a NEW connection on the same file
@@ -32,6 +35,7 @@ function sqliteAdapter(transaction) { const db = () => transaction ?? sqlite; re
     getAllAsync: async (sql, ...params) => db().prepare(sql).all(...params),
     getFirstAsync: async (sql, ...params) => db().prepare(sql).get(...params) ?? null,
     runAsync: async (sql, ...params) => {
+      if (failSqlDelete && sql.startsWith('DELETE')) throw new Error('SQL deletion failed');
       if (failCardWrite && sql.includes('INSERT INTO study_cards')) throw new Error('Card write failed');
       if (failWordWrite && sql.includes('INSERT INTO study_cards') && sql.includes("'word'")) throw new Error('Word write failed');
       return db().prepare(sql).run(...params);
@@ -46,6 +50,12 @@ function sqliteAdapter(transaction) { const db = () => transaction ?? sqlite; re
   },
 }; }
 mock.module('expo-sqlite', { exports: { openDatabaseAsync: async () => sqliteAdapter() } });
+
+mock.module('expo-file-system', { exports: {
+  Paths: { document: 'file:///private/' },
+  Directory: class { uri = 'file:///private/captures'; },
+  File: class { get exists() { return imageExists; } delete() { if (failImageDelete) throw new Error('Image deletion failed'); imageExists = false; } },
+} });
 
 const fixture = JSON.parse(await readFile(new URL('../fixtures/capture-record.json', import.meta.url), 'utf8'));
 const { captureToRow } = await import('../src/capture/types.ts');
@@ -242,6 +252,69 @@ test('personal paragraph translations persist separately without replacing uncha
   assert.equal((await store.loadCaptureById('editing')).sentenceTranslation, fixture.sentenceTranslation);
   await store.updateSavedText(group.id, group.text, '');
   assert.equal((await store.loadTextEntryForGroup(group.id)).personalMeaning, null);
+});
+
+test('practice is explicit and idempotent, follows current entries, and deletes independently', async () => {
+  const store = await import('../src/capture/store.ts');
+  const entry = (await store.loadStudyCards()).find((card) => card.captureId === 'editing' && card.kind === 'word');
+  assert.equal(await store.loadPracticeCardForEntry(entry.id), null);
+  const card = await store.createPracticeCard(entry.id);
+  assert.equal((await store.createPracticeCard(entry.id)).id, card.id);
+  assert.equal((await store.loadPracticeCards()).filter((item) => item.entryId === entry.id).length, 1);
+  assert.equal(card.answer.prompt, entry.lemma);
+  await store.updateWordCard(entry.id, { lemma: entry.lemma, reading: entry.reading, personalMeaning: 'Updated personal answer' });
+  assert.equal((await store.loadPracticeCard(card.id)).answer.personal, 'Updated personal answer');
+  assert.equal(card.captureId, entry.captureId);
+  assert.deepEqual(card.answer.sourceRegions, entry.sourceRegions);
+  await store.deletePracticeCard(card.id);
+  assert.equal(await store.loadPracticeCard(card.id), null);
+  assert.ok(await store.loadStudyCard(entry.id));
+  assert.ok(await store.loadCaptureById(entry.captureId));
+});
+
+test('entry deletion offers delete-both or latest-answer KEEP snapshots while preserving photo and other entries', async () => {
+  const store = await import('../src/capture/store.ts');
+  const word = (await store.loadStudyCards()).find((entry) => entry.captureId === 'editing' && entry.kind === 'word');
+  const practice = await store.createPracticeCard(word.id);
+  await store.updateWordCard(word.id, { lemma: word.lemma, reading: word.reading, personalMeaning: 'Latest approved answer' });
+  await store.deleteWordCard(word.id, { keepPracticeCards: true });
+  const kept = await store.loadPracticeCard(practice.id);
+  assert.equal(kept.entryId, null);
+  assert.equal(kept.answer.personal, 'Latest approved answer');
+  assert.deepEqual(kept.answer.sourceRegions, word.sourceRegions);
+  assert.equal(kept.captureId, word.captureId);
+  const group = (await store.loadTextGroups('editing'))[0];
+  const text = await store.loadTextEntryForGroup(group.id);
+  const textPractice = await store.createPracticeCard(text.id);
+  await store.deleteTextGroup(group.id);
+  assert.equal(await store.loadPracticeCard(textPractice.id), null);
+  assert.equal(await store.loadStudyCard(text.id), null);
+  assert.ok(await store.loadPracticeCard(practice.id));
+  assert.ok(await store.loadCaptureById(word.captureId));
+  assert.ok((await store.loadStudyCards()).some((entry) => entry.captureId !== word.captureId));
+});
+
+test('photo deletion is explicit across native connections and remains retryable on file or SQL failure', async () => {
+  const store = await import('../src/capture/store.ts');
+  const capture = await store.loadCaptureById('editing');
+  await store.saveCapture({ ...capture, imageUri: 'file:///private/captures/editing.jpg' });
+  assert.ok((await store.loadPracticeCards()).some((card) => card.captureId === capture.id && !card.entryId));
+  failImageDelete = true;
+  await assert.rejects(store.deleteCapture(capture.id), /Image deletion failed/);
+  failImageDelete = false;
+  assert.ok(await store.loadCaptureById(capture.id));
+  assert.ok(imageExists);
+  failSqlDelete = true;
+  await assert.rejects(store.deleteCapture(capture.id), /SQL deletion failed/);
+  failSqlDelete = false;
+  assert.ok(await store.loadCaptureById(capture.id));
+  assert.ok((await store.loadPracticeCards()).some((card) => card.captureId === capture.id), 'Database deletion rolled back');
+  await store.deleteCapture(capture.id);
+  assert.equal(await store.loadCaptureById(capture.id), null);
+  assert.equal((await store.loadPracticeCards()).filter((card) => card.captureId === capture.id).length, 0, 'Detached cards deleted by source provenance');
+  assert.equal((await store.loadStudyCards()).filter((entry) => entry.captureId === capture.id).length, 0);
+  assert.ok(await store.loadCaptureById('rows'), 'Other source untouched');
+  imageExists = true;
 });
 
 test('a failed saved-text card write rolls back its group and source correction', async () => {

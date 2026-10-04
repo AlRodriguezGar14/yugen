@@ -90,7 +90,7 @@ export default function SavedGroupScreen() {
               </Pressable>
               {showPhoto && <SourcePhoto capture={source} regions={source.regions.filter((region) => group.regionIds.includes(region.id))} />}
               {/* One entry screen owns Edit, translation, Delete and the practice card for this saved text. */}
-              {entryId && <Pressable accessibilityRole="button" onPress={() => router.push({ pathname: '/card/[id]', params: { id: entryId, mode: 'dictionary' } })} style={styles.disclosureButton}><Text style={styles.disclosureText}>Open saved entry ›</Text></Pressable>}
+              {entryId && <Pressable accessibilityRole="button" onPress={() => router.push({ pathname: '/card/[id]', params: { id: entryId, mode: 'dictionary' } })} style={styles.disclosureButton}><Text style={styles.disclosureText}>Edit, translate, delete or practice ›</Text></Pressable>}
               <Pressable accessibilityRole="button" onPress={() => router.navigate({ pathname: '/(tabs)/capture', params: { captureId: source.id, groupId: group.id, fresh: undefined } })} style={styles.disclosureButton}><Text style={styles.disclosureText}>Original photo &amp; findings ›</Text></Pressable>
             </>
           )}

@@ -33,6 +33,14 @@ export default function TabLayout() {
           tabBarIcon: ({ color }) => <Text style={{ color, fontSize: 24, lineHeight: 28, fontWeight: '900' }}>＋</Text>,
         }}
       />
+      <Tabs.Screen
+        name="review"
+        options={{
+          title: 'OCR Review',
+          tabBarLabel: 'Drafts',
+          tabBarIcon: ({ color }) => <Text style={{ color, fontSize: 22, lineHeight: 28 }}>文</Text>,
+        }}
+      />
     </Tabs>
   );
 }

@@ -378,8 +378,8 @@ test('Library browses persisted independent entries and their linked photo sourc
   const pushes = [];
   const mounted = await mountScreen('../src/app/(tabs)/index.tsx', {
     'react-native-safe-area-context': {}, 'react-native': { StyleSheet: { create: (value) => value } },
-    '../../capture/store': { loadLibraryCaptures: async () => [], loadStudyCards: async () => entries },
-    '../../capture/review': { photoSummary: () => '' }, '../../theme': { colors: {} },
+    '../../capture/store': { loadLibraryCaptures: async () => [], loadStudyCards: async () => entries, loadPracticeCards: async () => [] },
+    '../../capture/review': { photoSummary: () => '' }, '../../capture/entryActions': {}, '../../theme': { colors: {} },
   }, {}, { push: (route) => pushes.push(route) });
   await mounted.frame();
   mounted.slots[0].value = 'vocabulary';
@@ -388,4 +388,23 @@ test('Library browses persisted independent entries and their linked photo sourc
   assert.deepEqual(pushes[0], { pathname: '/card/[id]', params: { id: 'word', mode: 'dictionary' } });
   mounted.slots[1].value = 'missing';
   assert.doesNotMatch(await mounted.frame(), /fruit/);
+});
+
+
+test('the practice screen hides answers until Reveal and keeps its linked entry action separate', async () => {
+  const card = { id: 'practice', entryId: 'word', captureId: fixture.id, answer: { kind: 'word', prompt: '狗', reading: 'いぬ', dictionaryMeaning: 'Recorded dictionary entry for 犬 · dog', personal: 'My dog', sourceText: '犬', sourceRegions: [] } };
+  const pushes = [];
+  const mounted = await mountScreen('../src/app/practice/[id].tsx', {
+    'react-native-safe-area-context': {}, 'react-native': { StyleSheet: { create: (value) => value }, Alert: {} },
+    '../../capture/store': { loadPracticeCard: async () => card, deletePracticeCard: async () => {}, loadCaptureById: async () => fixture },
+    '../../capture/SourcePhoto': { default: () => null }, '../../theme': { colors: {} },
+  }, { id: card.id }, { push: (route) => pushes.push(route), back() {} });
+  await mounted.frame();
+  const front = await mounted.frame();
+  assert.match(front, /狗/);
+  assert.doesNotMatch(front, /Recorded dictionary entry|My dog|いぬ/);
+  const revealed = await mounted.press('Reveal answer');
+  assert.match(revealed, /Recorded dictionary entry.*My dog/);
+  await mounted.press('Open entry ›');
+  assert.deepEqual(pushes[0], { pathname: '/card/[id]', params: { id: 'word', mode: 'dictionary' } });
 });

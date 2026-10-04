@@ -2,7 +2,8 @@ import { useEffect, useState } from 'react';
 import { router, useLocalSearchParams } from 'expo-router';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { ActivityIndicator, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
-import { enrichWordCardCharacters, loadCaptureById, loadStudyCard, loadTextGroup, saveAnalysisForText, saveGroupAnalysisForText, updateWordCard, updateSavedText, WordConflictError, type StudyCard } from '../../capture/store';
+import { deleteTextGroup, deleteWordCard, createPracticeCard, loadPracticeCardForEntry, EntryDeletedError, type PracticeCard, enrichWordCardCharacters, loadCaptureById, loadStudyCard, loadTextGroup, saveAnalysisForText, saveGroupAnalysisForText, updateWordCard, updateSavedText, WordConflictError, type StudyCard } from '../../capture/store';
+import { confirmEntryDeletion } from '../../capture/entryActions';
 import { requestJapaneseAnalysis, analysisFailureMessage } from '../../capture/analysis';
 import { studyDataForCard } from '../../capture/studyCards';
 import { analysisRequestFor, type CaptureRecord } from '../../capture/types';
@@ -23,17 +24,21 @@ export default function StudyCardScreen() {
   const [showPhoto, setShowPhoto] = useState(false);
   const [reload, setReload] = useState(0);
   const [draft, setDraft] = useState<{ text: string; lemma: string; reading: string; meaning: string } | null>(null);
-  const [pending, setPending] = useState<'saving' | null>(null);
+  const [pending, setPending] = useState<'saving' | 'deleting' | null>(null);
   const [status, setStatus] = useState<{ text: string; error: boolean } | null>(null);
+  const [deleted, setDeleted] = useState<string | null>(null);
+  const [practice, setPractice] = useState<PracticeCard | null>(null);
+  const [creatingPractice, setCreatingPractice] = useState(false);
   useEffect(() => {
     let active = true;
     loadStudyCard(id).then(async (savedCard) => {
       const source = savedCard ? await loadCaptureById(savedCard.captureId) : null;
       const group = savedCard?.groupId ? await loadTextGroup(savedCard.groupId) : null;
+      const linkedPractice = savedCard ? await loadPracticeCardForEntry(savedCard.id) : null;
       const context = source && savedCard ? { ...source, correctedText: savedCard.sourceText,
         analysis: group?.text === savedCard.sourceText ? group.analysis : source.analysis?.normalizedText === savedCard.sourceText ? source.analysis : null,
         analysisReview: group?.text === savedCard.sourceText ? group.analysisReview : source.analysisReview } : null;
-      if (active) { setCard(savedCard); setCapture(context); setRegionIds(group?.regionIds ?? []); setLoading(false); setPending(null); }
+      if (active) { setCard(savedCard); setCapture(context); setRegionIds(group?.regionIds ?? []); setPractice(linkedPractice); setLoading(false); setPending(null); }
     }).catch(() => { if (active) { setError('This card could not be opened. Your Library remains saved.'); setLoading(false); setPending(null); } });
     return () => { active = false; };
   }, [id, reload]);
@@ -86,6 +91,35 @@ export default function StudyCardScreen() {
     }
   }
 
+  function confirmDelete() {
+    if (!card || pending) return;
+    const word = card.kind === 'word';
+    confirmEntryDeletion(card.kind, !!practice, (options) => {
+      setPending('deleting');
+      setStatus({ text: 'Deleting…', error: false });
+      (word ? deleteWordCard(card.id, options) : deleteTextGroup(card.groupId!, options))
+        .then(() => {
+          setStatus(null);
+          const kept = practice && options.keepPracticeCards ? ' Its practice card was kept.' : practice ? ' Its practice card was deleted.' : '';
+          setDeleted(`${word ? 'Word deleted. Its text and photo remain.' : 'Text deleted. Its words and photo remain.'}${kept}`);
+        })
+        .catch(() => setStatus({ text: 'It could not be deleted. It is still saved; try again.', error: true }))
+        .finally(() => setPending(null));
+    });
+  }
+
+  async function openOrCreatePractice() {
+    if (!card || creatingPractice) return;
+    if (practice) { router.push({ pathname: '/practice/[id]', params: { id: practice.id } }); return; }
+    setCreatingPractice(true);
+    setStatus({ text: 'Creating practice card…', error: false });
+    try {
+      setPractice(await createPracticeCard(card.id));
+      setStatus({ text: 'Practice card created. Find it under Practice in your Library.', error: false });
+    } catch (cause) {
+      setStatus({ text: cause instanceof EntryDeletedError ? cause.message : 'The practice card could not be created. Try again.', error: true });
+    } finally { setCreatingPractice(false); }
+  }
   return (
     <SafeAreaView style={styles.screen}>
       <View style={styles.header}>
@@ -93,7 +127,7 @@ export default function StudyCardScreen() {
         <Text style={styles.title}>{card?.kind === 'word' ? 'Word entry' : card?.kind === 'sentence' ? 'Text entry' : 'Saved entry'}</Text>
       </View>
       <ScrollView contentContainerStyle={styles.content}>
-        {loading ? <ActivityIndicator /> : !card || !capture ? <Text style={styles.body}>{error ?? 'This card or its original source was deleted.'}</Text> : (
+        {deleted ? <Text accessibilityLiveRegion="polite" style={styles.body}>{deleted}</Text> : loading ? <ActivityIndicator /> : !card || !capture ? <Text style={styles.body}>{error ?? 'This card or its original source was deleted.'}</Text> : (
           <>
             <Text style={styles.label}>{card.kind === 'word' ? 'WORD' : 'TEXT'} · {revealed ? (card.kind === 'word' ? 'SAVED VOCABULARY' : 'SAVED TEXT') : 'RECALL FIRST'}</Text>
             {(!revealed || card.kind === 'sentence' || renamed) && <Text selectable style={styles.front}>{card.kind === 'word' ? card.lemma : card.sourceText}</Text>}
@@ -135,6 +169,13 @@ export default function StudyCardScreen() {
               <View style={styles.actions}>
                 <Pressable accessibilityRole="button" disabled={!!pending} onPress={startEditing} style={[styles.secondary, !!pending && styles.disabled]}>
                   <Text style={styles.actionText}>{card.kind === 'word' ? 'Edit word' : 'Edit text'}</Text>
+                </Pressable>
+                <Pressable accessibilityRole="button" accessibilityState={{ disabled: !!pending, busy: pending === 'deleting' }} disabled={!!pending} onPress={confirmDelete} style={[styles.secondary, !!pending && styles.disabled]}>
+                  <Text style={styles.danger}>{pending === 'deleting' ? 'Deleting…' : card.kind === 'word' ? 'Delete word' : 'Delete text'}</Text>
+                </Pressable>
+                <Pressable accessibilityRole="button" accessibilityState={{ disabled: !!pending || creatingPractice, busy: creatingPractice }} disabled={!!pending || creatingPractice}
+                  onPress={() => void openOrCreatePractice()} style={[styles.secondary, (!!pending || creatingPractice) && styles.disabled]}>
+                  <Text style={styles.actionText}>{creatingPractice ? 'Creating…' : practice ? 'Open practice card' : 'Create practice card (optional)'}</Text>
                 </Pressable>
               </View>
             )}

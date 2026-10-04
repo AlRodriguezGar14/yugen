@@ -1,6 +1,9 @@
 import * as SQLite from 'expo-sqlite';
+import { Directory, File, Paths } from 'expo-file-system';
+import { rowGroupsForCapture, unsavedRows } from './review';
 import { captureFromRow, captureToRow, type CaptureRecord, type CaptureRow, type TextGroup, type AnalysisToken, type AnalysisTokenReview, type NormalizedBounds } from './types';
 import { hiraganaReading, isContentToken } from './analysis';
+import { practiceAnswer, type PracticeAnswer } from './studyCards';
 
 let databasePromise: Promise<SQLite.SQLiteDatabase> | undefined;
 
@@ -83,6 +86,11 @@ async function database(): Promise<SQLite.SQLiteDatabase> {
       if (!cardColumns.has('source_regions')) await db.execAsync('ALTER TABLE study_cards ADD COLUMN source_regions TEXT');
       if (!cardColumns.has('personal_meaning')) await db.execAsync('ALTER TABLE study_cards ADD COLUMN personal_meaning TEXT');
       await db.execAsync("CREATE UNIQUE INDEX IF NOT EXISTS sentence_card_group ON study_cards(group_id) WHERE kind = 'sentence'");
+      // Practice cards are optional, independent exercises linked to saved knowledge.
+      await db.execAsync(`
+        CREATE TABLE IF NOT EXISTS practice_cards (id TEXT PRIMARY KEY NOT NULL, entry_id TEXT, answer_json TEXT, created_at TEXT NOT NULL, capture_id TEXT);
+        CREATE UNIQUE INDEX IF NOT EXISTS practice_card_entry ON practice_cards(entry_id) WHERE entry_id IS NOT NULL;
+      `);
       if (schemaVersion < 3) {
         await db.execAsync(`
           INSERT OR IGNORE INTO text_groups(id, capture_id, region_ids, text, analysis_json, review_json, saved_at)
@@ -414,4 +422,127 @@ export async function updateSavedText(groupId: string, text: string, translation
     // The user's own translation, kept apart from OCR, dictionary glosses and any future provider output.
     if (translation !== undefined) await txn.runAsync("UPDATE study_cards SET personal_meaning = ? WHERE kind = 'sentence' AND group_id = ?", translation.trim() || null, groupId);
   });
+}
+
+/** An optional recall exercise; while linked it always shows its entry's current answer. */
+export type PracticeCard = { id: string; entryId: string | null; createdAt: string; answer: PracticeAnswer | null;
+  /** Source photo, from the card's own provenance or its linked entry; null when unknown. */
+  captureId: string | null };
+type PracticeRow = { id: string; entry_id: string | null; answer_json: string | null; created_at: string; capture_id?: string | null };
+
+async function practiceFromRow(db: SQLite.SQLiteDatabase, row: PracticeRow): Promise<PracticeCard> {
+  const entry = row.entry_id ? await db.getFirstAsync<StudyCardRow>('SELECT * FROM study_cards WHERE id = ?', row.entry_id) : null;
+  const answer = entry ? practiceAnswer(cardFromRow(entry)) : row.answer_json ? JSON.parse(row.answer_json) as PracticeAnswer : null;
+  return { id: row.id, entryId: entry ? row.entry_id : null, createdAt: row.created_at, answer, captureId: row.capture_id ?? entry?.capture_id ?? null };
+}
+
+export async function loadPracticeCards(): Promise<PracticeCard[]> {
+  const db = await database();
+  const rows = await db.getAllAsync<PracticeRow>('SELECT * FROM practice_cards ORDER BY created_at DESC, id');
+  return Promise.all(rows.map((row) => practiceFromRow(db, row)));
+}
+
+export async function loadPracticeCard(id: string): Promise<PracticeCard | null> {
+  const db = await database();
+  const row = await db.getFirstAsync<PracticeRow>('SELECT * FROM practice_cards WHERE id = ?', id);
+  return row ? practiceFromRow(db, row) : null;
+}
+
+export async function loadPracticeCardForEntry(entryId: string): Promise<PracticeCard | null> {
+  const db = await database();
+  const row = await db.getFirstAsync<PracticeRow>('SELECT * FROM practice_cards WHERE entry_id = ?', entryId);
+  return row ? practiceFromRow(db, row) : null;
+}
+
+/** The entry a request depends on no longer exists; nothing was created or changed. */
+export class EntryDeletedError extends Error {}
+
+/** Creates the entry's practice card, or returns the existing one (idempotent). */
+export async function createPracticeCard(entryId: string): Promise<PracticeCard> {
+  const db = await database();
+  // One transaction: an entry deleted concurrently can never leave a card without entry or snapshot.
+  await db.withExclusiveTransactionAsync(async (txn) => {
+    const entry = await txn.getFirstAsync<{ capture_id: string }>('SELECT capture_id FROM study_cards WHERE id = ?', entryId);
+    if (!entry) throw new EntryDeletedError('This entry was deleted, so no practice card was created.');
+    await txn.runAsync('INSERT OR IGNORE INTO practice_cards (id, entry_id, answer_json, created_at, capture_id) VALUES (?, ?, NULL, ?, ?)',
+      `practice:${Date.now().toString(36)}:${Math.random().toString(36).slice(2, 8)}`, entryId, new Date().toISOString(), entry.capture_id);
+  });
+  // The entry (and its card) can be deleted between the commit and this read; report it, never return null.
+  const card = await loadPracticeCardForEntry(entryId);
+  if (!card) throw new EntryDeletedError('This entry was deleted, so its practice card no longer exists.');
+  return card;
+}
+
+/** Deletes only the practice card; its entry and photo remain. */
+export async function deletePracticeCard(id: string): Promise<void> {
+  const db = await database();
+  await db.runAsync('DELETE FROM practice_cards WHERE id = ?', id);
+}
+
+
+/** Deleting an entry can retain its practice as an independent current-answer snapshot. */
+export type EntryDeletion = { keepPracticeCards?: boolean };
+
+async function settlePracticeCards(txn: SQLite.SQLiteDatabase, entry: StudyCard, { keepPracticeCards = false }: EntryDeletion): Promise<void> {
+  if (keepPracticeCards) {
+    // A kept card records its source photo too, so a later whole-photo delete still removes it (older rows had none).
+    await txn.runAsync('UPDATE practice_cards SET entry_id = NULL, answer_json = ?, capture_id = ? WHERE entry_id = ?', JSON.stringify(practiceAnswer(entry)), entry.captureId, entry.id);
+  } else {
+    await txn.runAsync('DELETE FROM practice_cards WHERE entry_id = ?', entry.id);
+  }
+}
+
+export async function deleteWordCard(id: string, options: EntryDeletion = {}): Promise<void> {
+  const db = await database();
+  await db.withExclusiveTransactionAsync(async (txn) => {
+    const entry = await txn.getFirstAsync<StudyCardRow>("SELECT * FROM study_cards WHERE id = ? AND kind = 'word'", id);
+    if (entry) await settlePracticeCards(txn, cardFromRow(entry), options);
+    await txn.runAsync("DELETE FROM study_cards WHERE id = ? AND kind = 'word'", id);
+  });
+}
+
+export async function deleteTextGroup(id: string, options: EntryDeletion = {}): Promise<void> {
+  const db = await database();
+  await db.withExclusiveTransactionAsync(async (txn) => {
+    const entry = await txn.getFirstAsync<StudyCardRow>("SELECT * FROM study_cards WHERE kind = 'sentence' AND group_id = ?", id);
+    if (entry) await settlePracticeCards(txn, cardFromRow(entry), options);
+    await txn.runAsync("UPDATE study_cards SET group_id = NULL WHERE kind = 'word' AND group_id = ?", id);
+    await txn.runAsync("DELETE FROM study_cards WHERE kind = 'sentence' AND group_id = ?", id);
+    if (id.startsWith('legacy:')) await txn.runAsync('UPDATE captures SET saved_at = NULL WHERE id = ?', id.slice('legacy:'.length));
+    await txn.runAsync('DELETE FROM text_groups WHERE id = ?', id);
+  });
+}
+
+
+export async function loadOcrReviewCaptures(): Promise<CaptureRecord[]> {
+  const db = await database();
+  const rows = await db.getAllAsync<CaptureRow>('SELECT * FROM captures ORDER BY created_at DESC');
+  const saved = new Map((await db.getAllAsync<{ id: string; text: string }>('SELECT id, text FROM text_groups')).map((group) => [group.id, group.text]));
+  return rows.map(captureFromRow).filter((capture) => capture.status !== 'complete'
+    || !rowGroupsForCapture(capture).length || unsavedRows(capture, saved).length > 0);
+}
+
+export async function deleteCapture(id: string): Promise<boolean> {
+  try {
+    const db = await database();
+    const row = await db.getFirstAsync<CaptureRow>('SELECT * FROM captures WHERE id = ?', id);
+    if (row) {
+      const capturesDirectory = new Directory(Paths.document, 'captures');
+      const capturesPrefix = `${capturesDirectory.uri.replace(/\/$/, '')}/`;
+      if (row.image_uri.startsWith(capturesPrefix)) {
+        const file = new File(row.image_uri);
+        if (file.exists) file.delete();
+      }
+    }
+    await db.withExclusiveTransactionAsync(async (txn) => {
+      // Separate connection, foreign keys OFF: every dependent row is removed explicitly.
+      await txn.runAsync('DELETE FROM practice_cards WHERE capture_id = ? OR entry_id IN (SELECT id FROM study_cards WHERE capture_id = ?)', id, id);
+      await txn.runAsync('DELETE FROM study_cards WHERE capture_id = ?', id);
+      await txn.runAsync('DELETE FROM text_groups WHERE capture_id = ?', id);
+      await txn.runAsync('DELETE FROM captures WHERE id = ?', id);
+    });
+    return true;
+  } catch (error) {
+    throw error;
+  }
 }
