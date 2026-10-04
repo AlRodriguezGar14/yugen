@@ -30,10 +30,17 @@
     ],
     "ios": {
       "supportsTablet": true,
-      "bundleIdentifier": "com.yugen.dev"
+      "bundleIdentifier": "com.yugen.dev",
+      "infoPlist": {
+        "NSLocalNetworkUsageDescription": "Yugen connects to the Japanese analysis service running on your local network for readings and dictionary meanings.",
+        "NSAppTransportSecurity": {
+          "NSAllowsLocalNetworking": true
+        }
+      }
     },
     "android": {
       "package": "com.yugen.dev",
+      "usesCleartextTraffic": true,
       "adaptiveIcon": {
         "backgroundColor": "#E6F4FE",
         "foregroundImage": "./assets/android-icon-foreground.png",

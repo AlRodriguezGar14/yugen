@@ -16,6 +16,7 @@ async function database(): Promise<SQLite.SQLiteDatabase> {
           source TEXT NOT NULL,
           image_uri TEXT NOT NULL,
           image_metadata TEXT NOT NULL,
+          ocr_bounds TEXT,
           raw_text TEXT NOT NULL,
           regions TEXT NOT NULL,
           corrected_text TEXT NOT NULL,
@@ -23,6 +24,9 @@ async function database(): Promise<SQLite.SQLiteDatabase> {
           status TEXT NOT NULL
         );
       `);
+      const columns = await db.getAllAsync<{ name: string }>('PRAGMA table_info(captures)');
+      const names = new Set(columns.map((column) => column.name));
+      if (!names.has('ocr_bounds')) await db.execAsync('ALTER TABLE captures ADD COLUMN ocr_bounds TEXT');
       return db;
     })().catch((error: unknown) => {
       databasePromise = undefined;
@@ -41,15 +45,16 @@ async function writeCapture(db: SQLite.SQLiteDatabase, capture: CaptureRecord): 
   const row = captureToRow(capture);
   await db.runAsync(
     `INSERT INTO captures (
-      id, created_at, language, source, image_uri, image_metadata, raw_text,
+      id, created_at, language, source, image_uri, image_metadata, ocr_bounds, raw_text,
       regions, corrected_text, selected_region_id, status
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(id) DO UPDATE SET
       created_at = excluded.created_at,
       language = excluded.language,
       source = excluded.source,
       image_uri = excluded.image_uri,
       image_metadata = excluded.image_metadata,
+      ocr_bounds = excluded.ocr_bounds,
       raw_text = excluded.raw_text,
       regions = excluded.regions,
       corrected_text = excluded.corrected_text,
@@ -61,6 +66,7 @@ async function writeCapture(db: SQLite.SQLiteDatabase, capture: CaptureRecord): 
     row.source,
     row.image_uri,
     row.image_metadata,
+    row.ocr_bounds,
     row.raw_text,
     row.regions,
     row.corrected_text,

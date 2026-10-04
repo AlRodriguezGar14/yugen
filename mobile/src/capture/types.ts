@@ -11,6 +11,9 @@ export type CaptureImageMetadata = {
   mimeType: string | null;
   width: number;
   height: number;
+  /** Upright rendered dimensions; source width/height remain the untouched asset metadata. */
+  displayWidth?: number;
+  displayHeight?: number;
 };
 
 export type CaptureRegion = {
@@ -20,6 +23,7 @@ export type CaptureRegion = {
   confidence: number | null;
   review?: {
     selected?: boolean;
+    excluded?: boolean;
     correctedText?: string;
   };
 };
@@ -31,11 +35,45 @@ export type CaptureRecord = {
   source: CaptureSource;
   imageUri: string;
   imageMetadata: CaptureImageMetadata;
+  ocrBounds: NormalizedBounds | null;
   rawText: string;
   regions: CaptureRegion[];
   correctedText: string;
   selectedRegionId: string | null;
   status: CaptureStatus;
+};
+
+export type AnalysisTokenReview = { ignored: boolean; dictionaryCandidateId: string | null };
+
+export type DictionaryCandidate = {
+  id: string;
+  reading: string;
+  meanings: string[];
+  recommended: boolean;
+};
+
+export type AnalysisToken = {
+  surface: string;
+  lemma: string;
+  reading: string | null;
+  partOfSpeech: string;
+  dictionaryCandidates: DictionaryCandidate[];
+  curatedMeaning?: string | null;
+  scriptUnits: string[];
+  kanjiDetails?: KanjiDetail[];
+};
+
+export type KanjiDetail = { character: string; meanings: string[]; onReadings: string[]; kunReadings: string[] };
+
+export const ANALYSIS_CONTRACT_VERSION = 2 as const;
+
+export type AnalysisRequest = { contractVersion: typeof ANALYSIS_CONTRACT_VERSION; language: string; text: string };
+
+export type AnalysisResponse = {
+  contractVersion: typeof ANALYSIS_CONTRACT_VERSION;
+  language: string;
+  normalizedText: string;
+  tokens: AnalysisToken[];
 };
 
 export type CaptureRow = {
@@ -45,6 +83,7 @@ export type CaptureRow = {
   source: CaptureSource;
   image_uri: string;
   image_metadata: string;
+  ocr_bounds: string | null;
   raw_text: string;
   regions: string;
   corrected_text: string;
@@ -60,6 +99,7 @@ export function captureToRow(capture: CaptureRecord): CaptureRow {
     source: capture.source,
     image_uri: capture.imageUri,
     image_metadata: JSON.stringify(capture.imageMetadata),
+    ocr_bounds: capture.ocrBounds ? JSON.stringify(capture.ocrBounds) : null,
     raw_text: capture.rawText,
     regions: JSON.stringify(capture.regions),
     corrected_text: capture.correctedText,
@@ -76,6 +116,7 @@ export function captureFromRow(row: CaptureRow): CaptureRecord {
     source: row.source,
     imageUri: row.image_uri,
     imageMetadata: JSON.parse(row.image_metadata) as CaptureImageMetadata,
+    ocrBounds: row.ocr_bounds ? JSON.parse(row.ocr_bounds) as NormalizedBounds : null,
     rawText: row.raw_text,
     regions: JSON.parse(row.regions) as CaptureRegion[],
     correctedText: row.corrected_text,

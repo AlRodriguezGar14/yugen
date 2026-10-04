@@ -12,6 +12,7 @@
     "width": 1200,
     "height": 800
   },
+  "ocrBounds": { "x": 0.1, "y": 0.2, "width": 0.8, "height": 0.6 },
   "rawText": "本日のおすすめ\n鶏肉をください。\n",
   "regions": [
     {

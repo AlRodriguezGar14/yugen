@@ -5,7 +5,7 @@ import * as ImagePicker from 'expo-image-picker';
 import { Directory, File, Paths } from 'expo-file-system';
 import { analyzeJapaneseImage } from './src/capture/ocr';
 import CameraCapture from './src/capture/CameraCapture';
-import { markCaptureOcrFailed } from './src/capture/review';
+import { markCaptureOcrFailed, selectRecognizedFindings } from './src/capture/review';
 import { saveCapture } from './src/capture/store';
 import type { CaptureRecord, CaptureSource } from './src/capture/types';
 import CaptureHome from './src/capture/CaptureHome';
@@ -29,7 +29,7 @@ export default function App() {
   const [notice, setNotice] = useState<string | null>(null);
   const pendingDraftSave = useRef<Promise<void>>(Promise.resolve());
 
-  async function recognize(record: CaptureRecord) {
+  async function recognize(record: CaptureRecord, ocrBounds = record.ocrBounds) {
     if (record.status === 'failed' && record.rawText) {
       setBusy(true);
       try {
@@ -45,7 +45,7 @@ export default function App() {
       }
       return;
     }
-    const processing = { ...record, status: 'processing' as const };
+    const processing = { ...record, ocrBounds: ocrBounds ?? { x: 0, y: 0, width: 1, height: 1 }, status: 'processing' as const };
     let latest: CaptureRecord = processing;
     setCapture(processing);
     setBusy(true);
@@ -54,10 +54,17 @@ export default function App() {
 
     try {
       await saveCapture(processing);
-      const result = await analyzeJapaneseImage(processing.imageUri, processing.imageMetadata.width, processing.imageMetadata.height);
-      latest = { ...processing, rawText: result.rawText, regions: result.regions, status: 'complete' };
+      const result = await analyzeJapaneseImage(
+        processing.imageUri,
+        processing.imageMetadata.width,
+        processing.imageMetadata.height,
+        processing.ocrBounds,
+      );
+      latest = selectRecognizedFindings({ ...processing, rawText: result.rawText, regions: result.regions, status: 'complete',
+        imageMetadata: { ...processing.imageMetadata, displayWidth: result.imageDimensions.width, displayHeight: result.imageDimensions.height },
+      });
       await saveCapture(latest);
-      setNotice(result.regions.length ? 'Text is ready. Choose the line you want to keep.' : 'No text was found. Enter it manually.');
+      setNotice(result.regions.length ? 'Text is ready. Every recognized line is kept; uncheck or brush away what you do not need.' : 'No text was found. Enter it manually.');
     } catch (cause) {
       // Native OCR reasons (size limits, missing model) appear in device logs for diagnosis.
       console.warn('Yugen OCR failed', cause);
@@ -124,6 +131,7 @@ export default function App() {
           width: asset.width,
           height: asset.height,
         },
+        ocrBounds: null,
         rawText: '',
         regions: [],
         correctedText: '',
