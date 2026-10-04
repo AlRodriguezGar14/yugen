@@ -7,11 +7,86 @@ import * as analysisHelpers from '../src/capture/analysis.ts';
 import { brushTouchesBounds, cropBoundsToPixels, mapCropBoundsToImage, normalizeBounds, ocrResizeFor } from '../src/capture/geometry.ts';
 import { excludeRegions, selectRecognizedFindings, updateRegionCorrection } from '../src/capture/review.ts';
 
+const source = await readFile(new URL('../App.tsx', import.meta.url), 'utf8');
 const reviewSource = await readFile(new URL('../src/capture/CaptureReview.tsx', import.meta.url), 'utf8');
 const fixture = JSON.parse(await readFile(new URL('../fixtures/capture-record.json', import.meta.url), 'utf8'));
-// Local analysis of the fixture's corrected text (contract 2), as returned by the readings service.
-const fixtureAnalysis = {"contractVersion": 2, "language": "ja", "normalizedText": "鶏肉をください。", "tokens": [{"surface": "鶏肉", "lemma": "鶏肉", "reading": "とりにく", "partOfSpeech": "名詞", "dictionaryCandidates": [{"id": "1253020:とりにく", "reading": "とりにく", "meanings": ["chicken meat"], "recommended": true}], "scriptUnits": ["鶏", "肉"]}, {"surface": "を", "lemma": "を", "reading": "を", "partOfSpeech": "助詞", "dictionaryCandidates": [{"id": "1051240:を", "reading": "を", "meanings": ["indicates direct object of action"], "recommended": true}], "scriptUnits": []}, {"surface": "ください", "lemma": "くださる", "reading": "ください", "partOfSpeech": "動詞", "dictionaryCandidates": [{"id": "1001790:ください", "reading": "ください", "meanings": ["please (give me)"], "recommended": true}], "scriptUnits": []}, {"surface": "。", "lemma": "。", "reading": "。", "partOfSpeech": "補助記号", "dictionaryCandidates": [], "scriptUnits": []}]};
 
+/**
+ * Mounts a production screen under a minimal hook runtime whose effects and callbacks re-run only when their
+ * dependencies really change; `refocus()` re-runs focus callbacks like returning to the screen with Back.
+ */
+async function mountScreen(path, dependencies, routeParams = {}, router = { push() {}, back() {}, navigate() {} }, props = undefined) {
+  const slots = [];
+  const focus = new Map();
+  let cursor = 0;
+  // Pending effects by hook slot; an effect's deps are recorded only when it actually runs (like React's commit).
+  const queued = new Map();
+  const changed = (index, deps) => !slots[index] || !deps || !slots[index].deps || deps.some((dep, at) => !Object.is(dep, slots[index].deps[at]));
+  const react = {
+    useState: (initial) => {
+      const index = cursor++;
+      slots[index] ??= { value: typeof initial === 'function' ? initial() : initial };
+      return [slots[index].value, (value) => { slots[index].value = typeof value === 'function' ? value(slots[index].value) : value; }];
+    },
+    useRef: (initial) => { const index = cursor++; slots[index] ??= { value: { current: initial } }; return slots[index].value; },
+    useCallback: (fn, deps) => { const index = cursor++; if (changed(index, deps)) slots[index] = { value: fn, deps }; return slots[index].value; },
+    useEffect: (effect, deps) => {
+      const index = cursor++;
+      if (!changed(index, deps)) { queued.delete(index); return; }
+      slots[index] ??= { deps: undefined };
+      queued.set(index, () => { slots[index].cleanup?.(); slots[index].deps = deps; slots[index].cleanup = effect() ?? undefined; });
+    },
+  };
+  const render = (type, props) => typeof type === 'function' ? type(props) : { type, ...props };
+  const modules = {
+    react, 'react/jsx-runtime': { jsx: render, jsxs: render },
+    'expo-router': { router, useLocalSearchParams: () => routeParams,
+      useFocusEffect: (callback) => { focus.set(cursor, callback); react.useEffect(callback, [callback]); } },
+    ...dependencies,
+  };
+  // Compiles a production module against this runtime; `{ __compile: path, dependencies }` entries are nested modules.
+  async function compile(modulePath, moduleDependencies) {
+    const compiled = {};
+    const resolved = { react, 'react/jsx-runtime': modules['react/jsx-runtime'], ...moduleDependencies };
+    for (const [name, value] of Object.entries(resolved)) if (value?.__compile) resolved[name] = await compile(value.__compile, value.dependencies);
+    const source = await readFile(new URL(modulePath, import.meta.url), 'utf8');
+    new Function('require', 'exports', ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS, jsx: ts.JsxEmit.ReactJSX } }).outputText)((name) => {
+      assert.ok(name in resolved, `Unexpected screen dependency: ${name}`);
+      return resolved[name];
+    }, compiled);
+    return { __esModule: true, ...compiled };
+  }
+  const exports = await compile(path, modules);
+  const textOf = (node) => Array.isArray(node) ? node.map(textOf).join(' ')
+    : node && typeof node === 'object' ? textOf(node.children) : typeof node === 'string' || typeof node === 'number' ? String(node) : '';
+  const settle = () => new Promise((resolve) => setTimeout(resolve, 0));
+  async function frame() {
+    cursor = 0;
+    exports.default(props);
+    const runs = [...queued.values()];
+    queued.clear();
+    runs.forEach((run) => run());
+    await settle();
+    cursor = 0;
+    return textOf(exports.default(props));
+  }
+  async function refocus() {
+    for (const [index, callback] of focus) { slots[index]?.cleanup?.(); slots[index].cleanup = callback() ?? undefined; }
+    await settle();
+    return frame();
+  }
+  async function press(label) {
+    const find = (node) => Array.isArray(node) ? node.map(find).find(Boolean)
+      : node && typeof node === 'object' ? (node.accessibilityRole === 'button' && !node.disabled && (textOf(node.children).trim() === label || node.accessibilityLabel === label) ? node : find(node.children)) : undefined;
+    cursor = 0;
+    const button = find(exports.default(props));
+    assert.ok(button, `No button labeled ${label}`);
+    await button.onPress();
+    return frame();
+  }
+  const tree = () => { cursor = 0; return exports.default(props); };
+  return { slots, frame, refocus, press, tree };
+}
 test('actual OCR adapter renders upright before full-image recognition or legacy cropping', async () => {
   const ocrSource = await readFile(new URL('../src/capture/ocr.ts', import.meta.url), 'utf8');
   const snippet = ocrSource.slice(ocrSource.indexOf('export async function analyzeJapaneseImage(')).replace('export ', '');
@@ -106,7 +181,7 @@ test('actual brush stroke and undo handlers preserve corrections and raw OCR', (
   const currentCapture = { current: initial };
   const brushStroke = { current: null };
   const changes = [];
-  const snippet = reviewSource.slice(reviewSource.indexOf('  function applyEdit('), reviewSource.indexOf('  function restoreRegion('))
+  const snippet = reviewSource.slice(reviewSource.indexOf('  function applyEdit('), reviewSource.indexOf('  function chooseCandidate('))
     + reviewSource.slice(reviewSource.indexOf('  function paintNoise('), reviewSource.indexOf('  return (\n    <View style={styles.reviewContent}>'));
   const deps = { currentCapture, brushStroke, imageFit: { left: 0, top: 0, width: 300, height: 300 },
     brushTouchesBounds, excludeRegions, setBrushPoint: () => {},
@@ -152,7 +227,7 @@ test('shipped study preview shows local furigana, word meanings and collapsed ch
     if (node && typeof node === 'object') return textOf(node.children);
     return typeof node === 'string' || typeof node === 'number' ? String(node) : '';
   }
-  const props = { text: fixture.correctedText, analysis: fixtureAnalysis, busy: false, error: null, choices: {}, onChooseCandidate() {}, onRetry() {}, showHeading: true };
+  const props = { text: fixture.correctedText, analysis: fixture.analysis, busy: false, error: null, choices: {}, onChooseCandidate() {}, onRetry() {}, showHeading: true };
   const local = textOf(exports.default(props));
   assert.match(local, /WORDS & MEANINGS/);
   assert.match(local, /^とりにく\s+鶏肉\s+を[\s\S]*WORDS & MEANINGS/, 'Furigana sits on the text itself, ahead of the word list');
@@ -172,6 +247,145 @@ test('shipped study preview shows local furigana, word meanings and collapsed ch
   assert.match(inflected, /ください[\s\S]*くださる/, 'An inflected source keeps its own form beside the canonical word');
   assert.match(local, /chicken[\s\S]*Characters ·\s+鶏 肉\s+\+/, 'Character knowledge is an optional expansion below the word meaning');
   assert.doesNotMatch(local, /On ·|Kun ·/, 'Character readings stay collapsed until requested');
+  // Real pre-fix phone list analysis: 雨/魚 had no dictionary word; their character evidence must still show, labeled.
+  const list = JSON.parse(await readFile(new URL('../fixtures/n5-list-analysis.json', import.meta.url), 'utf8'));
+  const listText = textOf(exports.default({ ...props, text: list.normalizedText, analysis: list, onSaveWord() {} }));
+  const approvable = list.tokens.filter((token) => analysisHelpers.isContentToken(token) && token.dictionaryCandidates.some((candidate) => candidate.meanings.length)).length;
+  assert.equal(listText.match(/Save word/g)?.length, approvable, 'Save word only where a dictionary entry can be approved');
+  assert.doesNotMatch(listText.split('魚').at(-1), /Save word/, 'Character evidence (魚) offers no Save word');
+  assert.match(listText, /雨\s+NO DICTIONARY WORD · CHARACTER MEANINGS \(KANJIDIC\)\s+雨\s+·\s+rain\s+·\s+ウ \/ あめ/, 'Basic 雨 shows rain and its readings');
+  assert.match(listText, /魚\s+NO DICTIONARY WORD · CHARACTER MEANINGS \(KANJIDIC\)\s+魚\s+·\s+fish\s+·\s+ギョ \/ うお \/ さかな/);
+  assert.doesNotMatch(listText, /Unknown · no dictionary entry/, 'Kanji with character data are never shown as plain unknown');
+  assert.match(listText, /電食[\s\S]*electrolytic corrosion/, 'Dictionary words keep their own gloss; compounds are not split');
+  const evidence = { ...list.tokens[0], surface: '雨', lemma: '雨', reading: 'あめ', writtenFormEvidence: true, dictionaryCandidates: [{ id: '1171900:あめ', reading: 'あめ', meanings: ['rain'], recommended: false }] };
+  const labeled = textOf(exports.default({ ...props, text: '雨', analysis: { ...list, normalizedText: '雨', tokens: [evidence] } }));
+  assert.match(labeled, /DICTIONARY ENTRY FOR THIS WRITTEN FORM · NOT PLACED IN CONTEXT[\s\S]*rain/, 'A fallback entry is labeled as written-form evidence');
   const loading = textOf(exports.default({ ...props, analysis: null, busy: true }));
   assert.match(loading, /Checking local readings/);
+});
+
+test('actual row save handler sends only matching readings and that row’s own choices', () => {
+  const start = reviewSource.indexOf('  function reviewedGroup(');
+  const end = reviewSource.indexOf('  function paintNoise(', start);
+  assert.ok(start >= 0 && end > start, 'Missing review save handler extraction markers');
+  const snippet = reviewSource.slice(start, end);
+  const capture = { ...fixture, correctedText: '私の修正。' };
+  const row = { id: 'group:x:row:0:1', captureId: capture.id, text: '私の修正。', regionIds: ['0:1'], analysis: null, analysisReview: {}, savedAt: null };
+  const choice = { '0': { ignored: true, dictionaryCandidateId: 'chosen' } };
+  const saved = [];
+  function saveWith(analyses, group = row) {
+    const deps = { capture, analyses, reviews: { [`${row.id}\n${row.text}`]: choice }, reviewKey: (item) => `${item.id}\n${item.text}`, setSavingId: () => {},
+      onSave: (record, savedGroup) => saved.push({ record, group: savedGroup }) };
+    new Function(...Object.keys(deps), `${stripTypeScriptTypes(snippet)}\nreturn saveGroup;`)(...Object.values(deps))(group);
+  }
+  saveWith({});
+  assert.equal(saved[0].record, capture);
+  assert.equal(saved[0].group.analysis, null, 'A row saved before readings arrive carries no analysis');
+  assert.deepStrictEqual(saved[0].group.analysisReview, {});
+  saveWith({ [row.text]: { normalizedText: 'Previous text' } });
+  assert.equal(saved[1].group.analysis, null, 'Stale analysis is never saved');
+  const matching = { normalizedText: row.text };
+  saveWith({ [row.text]: matching });
+  assert.equal(saved[2].group.analysis, matching);
+  assert.deepStrictEqual(saved[2].group.analysisReview, choice);
+  assert.deepStrictEqual(saved[2].group.regionIds, ['0:1'], 'A row keeps its source region identity');
+  saveWith({ [row.text]: matching }, { ...row, id: 'group:x:row:9:9' });
+  assert.deepStrictEqual(saved[3].group.analysisReview, {}, "Identical text never authorizes another row's choices");
+});
+
+test('row save handler records resolved words and reports pending ones without hiding missing readings', async () => {
+  const start = source.indexOf('  async function saveSelection(');
+  const snippet = source.slice(start, source.indexOf('  async function saveVocabularyWord(', start));
+  const { savedTextNotice, unsavedRows } = await import('../src/capture/review.ts');
+  let notice = null;
+  let error = null;
+  let words = { added: 2, existing: 1, pending: 1, unknown: 0 };
+  let fail = false;
+  const savedGroups = [];
+  const capture = { ...fixture, regions: [{ ...fixture.regions[0], id: '0:0', text: '米', review: { selected: true } }, { ...fixture.regions[0], id: '1:0', text: '肉', review: { selected: true } }] };
+  const row = { id: `group:${capture.id}:row:0:0`, captureId: capture.id, regionIds: ['0:0'], text: '米', analysis: null, analysisReview: {}, savedAt: null };
+  const deps = { capture, setBusy() {}, setError: (value) => { error = value; }, setNotice: (value) => { notice = value; }, setCapture() {}, finishDraftSave: async () => {},
+    loadCaptureById: async () => capture, isCaptureDeleted: () => false,
+    saveTextGroup: async (_record, group) => { if (fail) throw new Error('Word write failed'); savedGroups.push(group); return words; },
+    loadTextGroups: async () => savedGroups, unsavedRows, savedTextNotice, afterCommit: (mutation) => mutation };
+  const saveSelection = new Function(...Object.keys(deps), `${stripTypeScriptTypes(snippet)}\nreturn saveSelection;`)(...Object.values(deps));
+  await saveSelection(capture, row);
+  assert.equal(notice, 'Text saved · 2 new words in Vocabulary · 1 already saved · 1 word needs a meaning choice. 1 row not saved yet.');
+  words = null;
+  await saveSelection(capture, row);
+  assert.match(notice, /Text saved in Saved texts with 0 words: readings are unavailable\. Retry readings/);
+  notice = null;
+  fail = true;
+  await saveSelection(capture, { ...row, id: `group:${capture.id}:row:1:0`, regionIds: ['1:0'], text: '肉' });
+  assert.equal(notice, null, 'A rolled-back save never reports success');
+  assert.match(error, /could not be saved/);
+
+  // Unchecked legacy lines leave the capture-wide selection empty; a nonblank row still saves on its own text.
+  fail = false;
+  error = null;
+  savedGroups.length = 0;
+  const unselected = { ...capture, correctedText: '', regions: capture.regions.map((region) => ({ ...region, review: { selected: false } })) };
+  deps.capture = unselected;
+  deps.loadCaptureById = async () => unselected;
+  const fromEmptySelection = new Function(...Object.keys(deps), `${stripTypeScriptTypes(snippet)}\nreturn saveSelection;`)(...Object.values(deps));
+  await fromEmptySelection(unselected, row);
+  assert.equal(error, null);
+  assert.deepStrictEqual(savedGroups.map((group) => group.id), [row.id], 'The row is saved even with an empty parent selection');
+  await fromEmptySelection(unselected, { ...row, text: ' \n ' });
+  assert.match(error, /enter some text/, 'An empty row is still rejected');
+  assert.equal(savedGroups.length, 1);
+});
+
+test('actual word save handler refuses changed or switched text and saves with the current capture', async () => {
+  const start = source.indexOf('  async function saveVocabularyWord(');
+  const snippet = source.slice(start, source.indexOf('  function startNewCapture(', start));
+  const { rowGroupsForCapture, textGroupsForCapture, updateRegionCorrection } = await import('../src/capture/review.ts');
+  const stale = { ...fixture, regions: [
+    { ...fixture.regions[0], id: '0:0', text: '米', review: { selected: true } },
+    { ...fixture.regions[0], id: '1:0', text: '肉', review: { selected: true } },
+  ] };
+  const row = rowGroupsForCapture(stale)[0];
+  const saves = [];
+  let error = null;
+  const currentCapture = { current: stale };
+  const deps = { currentCapture, rowGroupsForCapture, textGroupsForCapture, setBusy() {}, setNotice() {}, setError: (value) => { error = value; },
+    addWordCard: async (capture, index, reading, group) => { saves.push({ capture, index, reading, group }); return 'added'; } };
+  const saveVocabularyWord = new Function(...Object.keys(deps), `${stripTypeScriptTypes(snippet)}
+return saveVocabularyWord;`)(...Object.values(deps));
+
+  // Another row was corrected after the tap rendered: the word still saves, with the newer correction kept.
+  currentCapture.current = updateRegionCorrection(stale, '1:0', '鶏肉');
+  await saveVocabularyWord(stale, row, 0, 'こめ');
+  assert.equal(saves.length, 1);
+  assert.equal(saves[0].capture, currentCapture.current, 'The current capture is written, never the stale snapshot');
+  assert.equal(error, null);
+
+  currentCapture.current = updateRegionCorrection(stale, '0:0', '米国');
+  await saveVocabularyWord(stale, row, 0, 'こめ');
+  assert.equal(saves.length, 1, 'A word from text that changed meanwhile is not saved');
+  assert.match(error, /changed while saving/);
+
+  currentCapture.current = { ...stale, id: 'another-capture' };
+  await saveVocabularyWord(stale, row, 0, 'こめ');
+  currentCapture.current = null;
+  await saveVocabularyWord(stale, row, 0, 'こめ');
+  assert.equal(saves.length, 1, 'Nothing is saved after switching captures');
+});
+
+
+test('Library browses persisted independent entries and their linked photo sources', async () => {
+  const entries = [{ id: 'word', captureId: 'qa', kind: 'word', lemma: '果実', reading: 'かじつ', sourceText: '果実', groupId: null, createdAt: '2026-10-04', wordSnapshot: { dictionaryCandidates: [{ meanings: ['fruit'] }] } }];
+  const pushes = [];
+  const mounted = await mountScreen('../src/app/(tabs)/index.tsx', {
+    'react-native-safe-area-context': {}, 'react-native': { StyleSheet: { create: (value) => value } },
+    '../../capture/store': { loadLibraryCaptures: async () => [], loadStudyCards: async () => entries },
+    '../../capture/review': { photoSummary: () => '' }, '../../theme': { colors: {} },
+  }, {}, { push: (route) => pushes.push(route) });
+  await mounted.frame();
+  mounted.slots[0].value = 'vocabulary';
+  assert.match(await mounted.frame(), /果実.*fruit/);
+  await mounted.press('Study word card 果実');
+  assert.deepEqual(pushes[0], { pathname: '/card/[id]', params: { id: 'word', mode: 'dictionary' } });
+  mounted.slots[1].value = 'missing';
+  assert.doesNotMatch(await mounted.frame(), /fruit/);
 });

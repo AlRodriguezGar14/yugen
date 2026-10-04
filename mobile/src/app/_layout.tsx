@@ -8,6 +8,7 @@ export default function RootLayout() {
       <StatusBar style="dark" />
       <Stack screenOptions={{ headerShown: false, contentStyle: { backgroundColor: colors.paper } }}>
         <Stack.Screen name="(tabs)" />
+        <Stack.Screen name="sentence/[id]" />
       </Stack>
     </>
   );

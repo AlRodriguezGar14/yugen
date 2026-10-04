@@ -1,17 +1,20 @@
 import { useEffect, useRef, useState } from 'react';
 import { ActivityIndicator, Image, Pressable, ScrollView, StyleSheet, Text, TextInput, View, useWindowDimensions, type GestureResponderEvent } from 'react-native';
-import { excludeRegions, restoreRegion as restoreCaptureRegion, toggleRegionSelection, updateManualCorrection, updateRegionCorrection } from './review';
-import { analysisFailureMessage, requestJapaneseAnalysis } from './analysis';
+import { analysisFailureMessage, readingToSave, requestJapaneseAnalysis } from './analysis';
+import { rowGroupsForCapture, textGroupsForCapture, excludeRegions, restoreRegion as restoreCaptureRegion, updateManualCorrection, updateRegionCorrection } from './review';
 import { brushTouchesBounds, containFit } from './geometry';
-import { ANALYSIS_CONTRACT_VERSION, type AnalysisResponse, type AnalysisTokenReview, type CaptureRecord } from './types';
+import { ANALYSIS_CONTRACT_VERSION, type AnalysisResponse, type AnalysisTokenReview, type CaptureRecord, type TextGroup } from './types';
 import AnalysisReadingsAndMeanings from './CaptureAnalysisPreview';
 import { styles } from './uiStyles';
+import { loadTextGroups } from './store';
 import { colors } from '../theme';
 
+/** Dictionary choices belong to one exact text of one row or block; editing the text discards them. */
+const reviewKey = (group: TextGroup) => `${group.id}\n${group.text}`;
+
 /**
- * Photo-first review: the original photo with its recognized lines, the raw OCR kept unchanged,
- * and every recognized line kept with its own correction stored separately. An optional brush removes unwanted lines.
- * The kept text shows local furigana and dictionary meanings.
+ * Photo-first review: every kept OCR line is a study row with furigana, glosses and its own Save; lines of one
+ * native OCR block also form a paragraph that saves together. Raw OCR and the photo are never changed.
  */
 export default function CaptureReview({
   capture,
@@ -21,6 +24,8 @@ export default function CaptureReview({
   onChange,
   onNewCapture,
   onRetry,
+  onSave,
+  onSaveWord,
 }: {
   capture: CaptureRecord;
   busy: boolean;
@@ -29,7 +34,12 @@ export default function CaptureReview({
   onChange: (capture: CaptureRecord) => void;
   onNewCapture: () => void;
   onRetry: () => void;
+  onSave: (capture: CaptureRecord, group: TextGroup) => void;
+  onSaveWord: (capture: CaptureRecord, group: TextGroup, index: number, reading: string | null) => void;
 }) {
+  const rows = rowGroupsForCapture(capture);
+  // Multi-line OCR blocks also save as one paragraph text.
+  const blocks = textGroupsForCapture(capture).filter((group) => group.regionIds.length > 1);
   const { height: windowHeight } = useWindowDimensions();
   const [previewFrame, setPreviewFrame] = useState({ width: 0, height: 0 });
   const [displayImage, setDisplayImage] = useState({ width: capture.imageMetadata.displayWidth ?? capture.imageMetadata.width, height: capture.imageMetadata.displayHeight ?? capture.imageMetadata.height });
@@ -43,34 +53,59 @@ export default function CaptureReview({
   const brushStroke = useRef<{ previous: { x: number; y: number }; snapshot: CaptureRecord; changed: boolean } | null>(null);
   // Overlays use the upright image as displayed; encoded metadata can be swapped by EXIF rotation.
   const imageFit = containFit(previewFrame, { width: capture.imageMetadata.displayWidth ?? displayImage.width, height: capture.imageMetadata.displayHeight ?? displayImage.height });
+  const [focusedRegionId, setFocusedRegionId] = useState<string | null>(null);
+  const [editingRowId, setEditingRowId] = useState<string | null>(null);
+  const [openParagraphs, setOpenParagraphs] = useState<Set<string>>(() => new Set());
+  const [savedGroupTexts, setSavedGroupTexts] = useState<Record<string, string>>({});
+  const [savingId, setSavingId] = useState<string | null>(null);
   const [analyses, setAnalyses] = useState<Record<string, AnalysisResponse>>({});
   const [analysisErrors, setAnalysisErrors] = useState<Record<string, string>>({});
   const [analysisAttempt, setAnalysisAttempt] = useState(0);
-  // Dictionary choices belong to one exact text; editing the text discards them.
   const [reviews, setReviews] = useState<Record<string, Record<string, AnalysisTokenReview>>>({});
   const analysesRef = useRef(analyses);
   useEffect(() => { analysesRef.current = analyses; }, [analyses]);
-  const studyText = capture.correctedText;
 
-  // Load readings once per exact kept text.
+  // Which rows are saved, reloaded after each save; saved rows reopen with their readings and explicit choices.
   useEffect(() => {
-    if (!studyText.trim() || analysesRef.current[studyText]) return undefined;
     let active = true;
-    Promise.resolve().then(async () => {
-      // Typing edits the text on every keystroke; analyze once it settles.
-      await new Promise((resolve) => setTimeout(resolve, 300));
+    loadTextGroups(capture.id).then((items) => {
       if (!active) return;
-      try {
-        const analysis = await requestJapaneseAnalysis({ contractVersion: ANALYSIS_CONTRACT_VERSION, language: capture.language, text: studyText });
-        // Readings stay valid for their exact text even if the text changed meanwhile.
-        setAnalyses((current) => ({ ...current, [studyText]: analysis }));
-      } catch (cause) {
-        console.warn('Yugen readings failed', cause);
-        if (active) setAnalysisErrors((current) => ({ ...current, [studyText]: analysisFailureMessage(cause) }));
+      setSavedGroupTexts(Object.fromEntries(items.map((group) => [group.id, group.text])));
+      // Newer in-session readings and choices win.
+      setAnalyses((current) => ({ ...Object.fromEntries(items.flatMap((group) => group.analysis?.normalizedText === group.text ? [[group.text, group.analysis]] : [])), ...current }));
+      setReviews((current) => ({ ...Object.fromEntries(items.map((group) => [reviewKey(group), group.analysisReview])), ...current }));
+    }).catch(() => {});
+    return () => { active = false; };
+  }, [capture.id, notice, busy]);
+
+  // Load readings for every row and block once per exact text.
+  const textsKey = JSON.stringify([...new Set([...rows, ...blocks].map((group) => group.text).filter((text) => text.trim()))]);
+  useEffect(() => {
+    let active = true;
+    const texts = JSON.parse(textsKey) as string[];
+    Promise.resolve().then(async () => {
+      // Typing in a row edits its text on every keystroke; analyze once it settles.
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      for (const text of texts) {
+        if (!active) return;
+        if (analysesRef.current[text]) continue;
+        try {
+          const analysis = await requestJapaneseAnalysis({ contractVersion: ANALYSIS_CONTRACT_VERSION, language: capture.language, text });
+          // Readings stay valid for their exact text even if the rows changed meanwhile.
+          setAnalyses((current) => ({ ...current, [text]: analysis }));
+        } catch (cause) {
+          console.warn('Yugen readings failed', cause);
+          if (active) setAnalysisErrors((current) => ({ ...current, [text]: analysisFailureMessage(cause) }));
+        }
       }
     });
     return () => { active = false; };
-  }, [capture.language, studyText, analysisAttempt]);
+  }, [capture.language, textsKey, analysisAttempt]);
+
+  const linesOf = (block: TextGroup) => rows.filter((row) => block.regionIds.includes(row.regionIds[0]));
+  const paragraphs = blocks.filter((block) => linesOf(block).length > 1);
+  const units = [...paragraphs, ...rows.filter((row) => !paragraphs.some((block) => block.regionIds.includes(row.regionIds[0])))];
+  const savedRowCount = rows.filter((row) => row.text.trim() && savedGroupTexts[row.id] === row.text).length;
   const kept = capture.regions.filter((region) => !region.review?.excluded);
   const excluded = capture.regions.filter((region) => region.review?.excluded);
 
@@ -81,13 +116,124 @@ export default function CaptureReview({
     onChange(record);
   }
 
-  function chooseCandidate(index: number, dictionaryCandidateId: string) {
-    setReviews((current) => ({ ...current, [studyText]: { ...current[studyText], [index]: { ignored: current[studyText]?.[index]?.ignored ?? false, dictionaryCandidateId } } }));
+  function chooseCandidate(group: TextGroup, index: number, dictionaryCandidateId: string) {
+    setUndoHistory([]);
+    const key = reviewKey(group);
+    setReviews((current) => ({ ...current, [key]: { ...current[key], [index]: { ignored: current[key]?.[index]?.ignored ?? false, dictionaryCandidateId } } }));
+  }
+
+  function saveButton(group: TextGroup, noun: 'row' | 'paragraph') {
+    const saved = savedGroupTexts[group.id] === group.text;
+    const blank = !group.text.trim();
+    const label = busy && savingId === group.id ? 'Saving…' : saved ? 'Save again' : `Save ${noun}`;
+    return (
+      <Pressable accessibilityRole="button" accessibilityLabel={`${label} ${group.text}`} disabled={busy || blank}
+        onPress={() => saveGroup(group)} style={[styles.rowSave, (busy || blank) && styles.disabled]}>
+        <Text style={styles.wordSaveText}>{label}</Text>
+      </Pressable>
+    );
+  }
+
+  function study(group: TextGroup) {
+    const analysis = analyses[group.text] ?? null;
+    const choices = Object.fromEntries(Object.entries(reviews[reviewKey(group)] ?? {}).flatMap(([index, review]) => review.dictionaryCandidateId ? [[index, review.dictionaryCandidateId]] : []));
+    return (
+      <AnalysisReadingsAndMeanings
+        key={reviewKey(group)}
+        text={group.text}
+        analysis={analysis}
+        busy={!analysis && !analysisErrors[group.text]}
+        error={analysis ? null : analysisErrors[group.text] ?? null}
+        choices={choices}
+        onChooseCandidate={(index, id) => chooseCandidate(group, index, id)}
+        onRetry={retryReadings}
+        onSaveWord={(index) => saveWord(group, index)}
+        onEnrichCharacters={(index, details) => setAnalyses((current) => current[group.text] ? { ...current, [group.text]: { ...current[group.text], tokens: current[group.text].tokens.map((token, tokenIndex) => tokenIndex === index ? { ...token, kanjiDetails: details } : token) } } : current)}
+      />
+    );
+  }
+
+  function paragraphCard(block: TextGroup) {
+    const lines = linesOf(block);
+    const open = openParagraphs.has(block.id);
+    const saved = savedGroupTexts[block.id] === block.text;
+    return (
+      <View key={block.id} style={[styles.findingCard, !!focusedRegionId && block.regionIds.includes(focusedRegionId) && styles.selectedFinding]}>
+        <Text style={styles.sectionLabel}>PARAGRAPH · {lines.length} LINES{saved ? ' · SAVED' : ''}</Text>
+        <View style={styles.rowActions}>
+          {saveButton(block, 'paragraph')}
+          <Pressable accessibilityRole="button" accessibilityState={{ expanded: open }} onPress={() => setOpenParagraphs((current) => {
+            const next = new Set(current);
+            if (open) next.delete(block.id); else next.add(block.id);
+            return next;
+          })} style={styles.rowAction}>
+            <Text style={styles.rowActionText}>{open ? 'Hide lines' : `Lines · ${lines.length}`}</Text>
+          </Pressable>
+        </View>
+        {block.text.trim() ? study(block) : <Text style={styles.helperText}>No lines of this paragraph are kept.</Text>}
+        {open && lines.map((line) => rowCard(line))}
+      </View>
+    );
   }
 
   function retryReadings() {
     setAnalysisErrors({});
     setAnalysisAttempt((attempt) => attempt + 1);
+  }
+
+  function rowCard(group: TextGroup) {
+    const region = capture.regions.find((item) => item.id === group.regionIds[0]);
+    const saved = savedGroupTexts[group.id] === group.text;
+    const editing = !!region && editingRowId === group.id;
+    const blank = !group.text.trim();
+    return (
+      <View key={group.id} style={[styles.findingCard, !!region && region.id === focusedRegionId && styles.selectedFinding]}>
+        <Text style={styles.sectionLabel}>{region ? `LINE ${capture.regions.indexOf(region) + 1}` : 'TYPED TEXT'}{saved ? ' · SAVED' : ''}</Text>
+        {blank ? <Text style={styles.helperText}>This row is empty. Type its text or brush it away.</Text> : study(group)}
+        <View style={styles.rowActions}>
+          {/* Saving again is idempotent and adds words resolved since (new readings or choices). */}
+          {saveButton(group, 'row')}
+          {region && (
+            <Pressable accessibilityRole="button" accessibilityState={{ expanded: editing }} onPress={() => setEditingRowId(editing ? null : group.id)} style={styles.rowAction}>
+              <Text style={styles.rowActionText}>{editing ? 'Done editing' : 'Edit'}</Text>
+            </Pressable>
+          )}
+        </View>
+        {editing && (
+          <>
+            <TextInput
+              editable={!busy}
+              accessibilityLabel="Corrected text for this row"
+              multiline
+              onChangeText={(value) => applyEdit(updateRegionCorrection(capture, region.id, value))}
+              placeholder="Correct this row"
+              placeholderTextColor="#929991"
+              style={styles.inlineEditor}
+              textAlignVertical="top"
+              value={group.text}
+            />
+            {region.confidence !== null && <Text style={styles.confidence}>OCR confidence {Math.round(region.confidence * 100)}%</Text>}
+          </>
+        )}
+      </View>
+    );
+  }
+
+  function reviewedGroup(group: TextGroup): TextGroup {
+    const analysis = analyses[group.text]?.normalizedText === group.text ? analyses[group.text] : null;
+    return { ...group, analysis, analysisReview: analysis ? { ...reviews[reviewKey(group)] } : {} };
+  }
+
+  function saveGroup(group: TextGroup) {
+    setSavingId(group.id);
+    onSave(capture, reviewedGroup(group));
+  }
+
+  /** Saves one explicitly approved word together with its row or paragraph. */
+  function saveWord(group: TextGroup, index: number) {
+    const reviewed = reviewedGroup(group);
+    const token = reviewed.analysis?.tokens[index];
+    onSaveWord(capture, reviewed, index, token ? readingToSave(token, reviewed.analysisReview[index]?.dictionaryCandidateId) : null);
   }
 
   function restoreRegion(regionId: string) {
@@ -157,12 +303,12 @@ export default function CaptureReview({
             <Pressable
               key={region.id}
               accessibilityRole="button"
-              accessibilityLabel={`Keep or skip line ${index + 1}: ${region.review?.correctedText ?? region.text}`}
+              accessibilityLabel={`Show row ${index + 1}: ${region.review?.correctedText ?? region.text}`}
               disabled={busy || brushEnabled || !!region.review?.excluded}
-              onPress={() => applyEdit(toggleRegionSelection(capture, region.id))}
+              onPress={() => setFocusedRegionId(region.id)}
               style={[
                 styles.regionOutline,
-                region.review?.selected && styles.highlightOutline,
+                region.id === focusedRegionId && styles.highlightOutline,
                 region.review?.excluded && styles.removedRegionOutline,
                 {
                   left: imageFit.left + region.bounds.x * imageFit.width,
@@ -234,57 +380,10 @@ export default function CaptureReview({
           </View>
         )}
 
-        {kept.map((region) => {
-          const selected = !!region.review?.selected;
-          return (
-            <View key={region.id} style={[styles.findingCard, selected && styles.selectedFinding]}>
-              <View style={styles.findingHeader}>
-                <Pressable accessibilityRole="checkbox" accessibilityState={{ checked: selected }} accessibilityLabel={`Keep line ${capture.regions.indexOf(region) + 1}`}
-                  disabled={busy} onPress={() => applyEdit(toggleRegionSelection(capture, region.id))} style={styles.findingSelect}>
-                  <View style={[styles.checkbox, selected && styles.checkboxSelected]}>{selected && <Text style={styles.checkboxMark}>✓</Text>}</View>
-                </Pressable>
-                <View style={styles.findingTextButton}>
-                  <Text style={styles.sectionLabel}>LINE {capture.regions.indexOf(region) + 1}{selected ? ' · KEPT' : ''}</Text>
-                  <Text style={styles.findingRaw}>{region.text}</Text>
-                </View>
-              </View>
-              {selected && (
-                <>
-                  <TextInput
-                    editable={!busy}
-                    accessibilityLabel="Corrected text for this line"
-                    multiline
-                    onChangeText={(value) => applyEdit(updateRegionCorrection(capture, region.id, value))}
-                    placeholder="Correct this line"
-                    placeholderTextColor="#929991"
-                    style={styles.inlineEditor}
-                    textAlignVertical="top"
-                    value={region.review?.correctedText ?? region.text}
-                  />
-                  {region.confidence !== null && <Text style={styles.confidence}>OCR confidence {Math.round(region.confidence * 100)}%</Text>}
-                </>
-              )}
-            </View>
-          );
-        })}
-
-        {capture.status !== 'processing' && !!studyText.trim() && (
-          <View style={styles.findingCard}>
-            <Text style={styles.sectionLabel}>KEPT TEXT · LOCAL READINGS</Text>
-            <AnalysisReadingsAndMeanings
-              key={studyText}
-              text={studyText}
-              analysis={analyses[studyText] ?? null}
-              busy={!analyses[studyText] && !analysisErrors[studyText]}
-              error={analyses[studyText] ? null : analysisErrors[studyText] ?? null}
-              choices={Object.fromEntries(Object.entries(reviews[studyText] ?? {}).flatMap(([index, review]) => review.dictionaryCandidateId ? [[index, review.dictionaryCandidateId]] : []))}
-              onChooseCandidate={chooseCandidate}
-              onRetry={retryReadings}
-              onEnrichCharacters={(index, details) => setAnalyses((current) => current[studyText] ? { ...current, [studyText]: { ...current[studyText], tokens: current[studyText].tokens.map((token, tokenIndex) => tokenIndex === index ? { ...token, kanjiDetails: details } : token) } } : current)}
-              showHeading
-            />
-          </View>
+        {units.length > 0 && (
+          <Text style={styles.sectionLabel}>{rows.length} {rows.length === 1 ? 'ROW' : 'ROWS'} · {savedRowCount} SAVED</Text>
         )}
+        {units.map((group) => paragraphs.includes(group) ? paragraphCard(group) : rowCard(group))}
 
         {excluded.length > 0 && (
           <Pressable accessibilityRole="button" onPress={() => setShowExcluded((current) => !current)} style={styles.disclosureButton}>

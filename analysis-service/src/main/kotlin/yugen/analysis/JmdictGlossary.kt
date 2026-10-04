@@ -19,7 +19,8 @@ data class DictionaryCandidate(
 internal class JmdictGlossary private constructor(
     private val entriesByForm: Map<String, List<Entry>>,
 ) {
-    fun lookup(surface: String, lemma: String, reading: String?, partOfSpeech: String): List<DictionaryCandidate> {
+    /** Entries for the token; a null [partOfSpeech] accepts senses of any part of speech. */
+    fun lookup(surface: String, lemma: String, reading: String?, partOfSpeech: String?): List<DictionaryCandidate> {
         val forms = setOf(surface, lemma, reading).filterNotNull().toSet()
         val candidates = forms.asSequence()
             .flatMap { entriesByForm[it].orEmpty().asSequence() }
@@ -74,7 +75,7 @@ internal class JmdictGlossary private constructor(
             surface: String,
             lemma: String,
             requestedReading: String?,
-            requestedPartOfSpeech: String,
+            requestedPartOfSpeech: String?,
         ): List<RankedCandidate> {
             val matchedKanji = kanji.firstOrNull { it == surface || it == lemma }
             val matchingReadings = readings.filter { variant ->
@@ -94,7 +95,7 @@ internal class JmdictGlossary private constructor(
                             (matchedKanji != null && matchedKanji in sense.kanjiRestrictions)) &&
                             (sense.readingRestrictions.isEmpty() ||
                                 variant.form in sense.readingRestrictions) &&
-                            sense.matchesPartOfSpeech(requestedPartOfSpeech)
+                            (requestedPartOfSpeech == null || sense.matchesPartOfSpeech(requestedPartOfSpeech))
                     }
                     .flatMap { it.glosses.asSequence() }
                     .distinct()

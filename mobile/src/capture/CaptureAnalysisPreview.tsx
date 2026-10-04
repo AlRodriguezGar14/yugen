@@ -13,6 +13,7 @@ export default function AnalysisReadingsAndMeanings({
   choices,
   onChooseCandidate,
   onRetry,
+  onSaveWord,
   onEnrichCharacters,
   showHeading = false,
 }: {
@@ -24,6 +25,8 @@ export default function AnalysisReadingsAndMeanings({
   onChooseCandidate: (index: number, id: string) => void;
   onRetry: () => void;
   showHeading?: boolean;
+  /** Saves one approved word; ambiguous words need a chosen sense first. */
+  onSaveWord?: (index: number) => void;
   onEnrichCharacters?: (index: number, details: KanjiDetail[]) => void;
 }) {
   const currentText = useRef<string | null>(text);
@@ -88,6 +91,7 @@ export default function AnalysisReadingsAndMeanings({
                 </View>
               </View>
               {word.sourceSurface && <Text style={styles.furiganaNote}>In source · {word.sourceSurface} · {word.sourceReading ? hiraganaReading(word.sourceReading) : 'Reading unknown'}</Text>}
+              {token.writtenFormEvidence && <Text style={styles.dictionaryLabel}>DICTIONARY ENTRY FOR THIS WRITTEN FORM · NOT PLACED IN CONTEXT</Text>}
               {token.dictionaryCandidates.length > 1 ? (
                 <>
                   <Text style={styles.dictionaryLabel}>DICTIONARY CANDIDATES</Text>
@@ -123,8 +127,26 @@ export default function AnalysisReadingsAndMeanings({
                   <Text style={styles.dictionaryLabel}>DICTIONARY</Text>
                   <Text style={styles.previewMeaning}>{token.dictionaryCandidates.length === 1 ? token.dictionaryCandidates[0].meanings.join('; ') : meaning.text}</Text>
                 </>
+              ) : token.kanjiDetails?.length ? (
+                <>
+                  {/* Character evidence, labeled: it describes each kanji, never a meaning of this word. */}
+                  <Text style={styles.dictionaryLabel}>NO DICTIONARY WORD · CHARACTER MEANINGS (KANJIDIC)</Text>
+                  {token.kanjiDetails.map((detail) => (
+                    <Text key={detail.character} style={styles.previewMeaning}>
+                      {detail.character} · {detail.meanings.slice(0, 3).join(', ') || 'no meaning listed'}
+                      {[...detail.onReadings, ...detail.kunReadings].length ? ` · ${[...detail.onReadings, ...detail.kunReadings].join(' / ')}` : ''}
+                    </Text>
+                  ))}
+                </>
               ) : (
                 <Text style={styles.previewUnknown}>Unknown · no dictionary entry</Text>
+              )}
+              {/* Only a word with an approvable dictionary entry or curated meaning can be saved; character evidence cannot. */}
+              {onSaveWord && savable(token) && (
+                <Pressable accessibilityRole="button" accessibilityLabel={`Save word ${token.surface}`} disabled={busy}
+                  onPress={() => onSaveWord(index)} style={[styles.wordSave, busy && styles.disabled]}>
+                  <Text style={styles.wordSaveText}>Save word</Text>
+                </Pressable>
               )}
               {!!token.scriptUnits.length && (
                 <>
@@ -183,6 +205,11 @@ function furiganaText(text: string, analysis: AnalysisResponse, choices: Record<
       ]))}
     </View>
   );
+}
+
+function savable(token: AnalysisResponse['tokens'][number]): boolean {
+  return token.dictionaryCandidates.some((candidate) => candidate.reading.trim() && candidate.meanings.some((meaning) => meaning.trim()))
+    || !!token.curatedMeaning?.trim();
 }
 
 function hasKanji(text: string): boolean {

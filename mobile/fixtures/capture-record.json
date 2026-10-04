@@ -25,5 +25,48 @@
   ],
   "correctedText": "鶏肉をください。",
   "selectedRegionId": "0:1",
-  "status": "complete"
+  "joinedWithoutBreaks": false,
+  "status": "complete",
+  "savedAt": "2026-09-30T00:01:00.000Z",
+  "sentenceTranslation": null,
+  "analysisReview": {},
+  "analysis": {
+    "contractVersion": 2,
+    "language": "ja",
+    "normalizedText": "鶏肉をください。",
+    "tokens": [
+      {
+        "surface": "鶏肉",
+        "lemma": "鶏肉",
+        "reading": "とりにく",
+        "partOfSpeech": "名詞",
+        "dictionaryCandidates": [{ "id": "1253020:とりにく", "reading": "とりにく", "meanings": ["chicken meat"], "recommended": true }],
+        "scriptUnits": ["鶏", "肉"]
+      },
+      {
+        "surface": "を",
+        "lemma": "を",
+        "reading": "を",
+        "partOfSpeech": "助詞",
+        "dictionaryCandidates": [{ "id": "1051240:を", "reading": "を", "meanings": ["indicates direct object of action"], "recommended": true }],
+        "scriptUnits": []
+      },
+      {
+        "surface": "ください",
+        "lemma": "くださる",
+        "reading": "ください",
+        "partOfSpeech": "動詞",
+        "dictionaryCandidates": [{ "id": "1001790:ください", "reading": "ください", "meanings": ["please (give me)"], "recommended": true }],
+        "scriptUnits": []
+      },
+      {
+        "surface": "。",
+        "lemma": "。",
+        "reading": "。",
+        "partOfSpeech": "補助記号",
+        "dictionaryCandidates": [],
+        "scriptUnits": []
+      }
+    ]
+  }
 }

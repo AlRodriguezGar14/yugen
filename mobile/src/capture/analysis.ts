@@ -74,6 +74,7 @@ function isAnalysisToken(value: unknown): value is AnalysisToken {
     && token.dictionaryCandidates.every(isDictionaryCandidate)
     && (token.curatedMeaning === undefined || token.curatedMeaning === null || typeof token.curatedMeaning === 'string')
     && isStringArray(token.scriptUnits)
+    && (token.writtenFormEvidence === undefined || typeof token.writtenFormEvidence === 'boolean')
     && (token.kanjiDetails === undefined || (Array.isArray(token.kanjiDetails) && token.kanjiDetails.every((entry) => {
       if (!entry || typeof entry !== 'object') return false;
       const detail = entry as Record<string, unknown>;
@@ -137,6 +138,13 @@ export function tokenMeaningForDisplay(
   const dictionaryMeaning = safeDictionaryMeaning(token.dictionaryCandidates, selectedId);
   if (dictionaryMeaning) return { text: dictionaryMeaning, source: 'JMdict' };
   return token.curatedMeaning ? { text: token.curatedMeaning, source: 'Yugen term guide' } : null;
+}
+
+/** The reading a Save word request uses: the explicit choice, else the only candidate, else the parser reading. */
+export function readingToSave(token: AnalysisToken, choiceId: string | null | undefined): string | null {
+  const candidate = token.dictionaryCandidates.find((item) => item.id === choiceId)
+    ?? (token.dictionaryCandidates.length === 1 ? token.dictionaryCandidates[0] : null);
+  return candidate?.reading ?? token.reading;
 }
 
 export function readingForDisplay(token: AnalysisToken, selectedId: string | null): string | null {

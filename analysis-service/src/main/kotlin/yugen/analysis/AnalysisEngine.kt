@@ -32,6 +32,8 @@ data class AnalyzedToken(
     val curatedMeaning: String? = null,
     val scriptUnits: List<String>,
     val kanjiDetails: List<KanjiDetails> = emptyList(),
+    /** True when the candidates are exact written-form entries the parser could not place in context. */
+    val writtenFormEvidence: Boolean = false,
 )
 
 class AnalysisEngine private constructor(
@@ -66,18 +68,23 @@ class AnalysisEngine private constructor(
                 .takeIf { it.isNotBlank() && it != "*" }
                 ?.let(::toHiragana)
             val partOfSpeech = morpheme.partOfSpeech().firstOrNull().orEmpty()
-            val dictionaryCandidates = glossary.lookup(surface, lemma, parserReading, partOfSpeech)
+            val partOfSpeechCandidates = glossary.lookup(surface, lemma, parserReading, partOfSpeech)
+            // In kanji lists Sudachi may tag a basic character as a suffix (雨 → う) that JMdict cannot support.
+            // Only then, an uninflected all-kanji token keeps its exact written-form entries of any part of speech.
+            val writtenFormFallback = partOfSpeechCandidates.isEmpty() && surface == lemma && isAllKanji(surface)
+            val dictionaryCandidates = if (writtenFormFallback) glossary.lookup(surface, lemma, null, null) else partOfSpeechCandidates
             val sentenceContext = lexicalTokenCount > 1
-            val candidates = if (sentenceContext) {
+            val candidates = if (sentenceContext || writtenFormFallback) {
                 dictionaryCandidates.map { it.copy(recommended = false) }
             } else {
                 dictionaryCandidates
             }
-            // A lemma reading cannot pronounce an inflected surface (ください ≠ くださる).
-            val reading = if (surface != lemma) {
-                parserReading
-            } else {
-                automaticFuriganaReading(parserReading, candidates, sentenceContext)
+            // A lemma reading cannot pronounce an inflected surface (ください ≠ くださる). A fallback token's
+            // parser reading belongs to the rejected interpretation; only a single dictionary reading replaces it.
+            val reading = when {
+                surface != lemma -> parserReading
+                writtenFormFallback && candidates.isNotEmpty() -> candidates.map(DictionaryCandidate::reading).distinct().singleOrNull()
+                else -> automaticFuriganaReading(parserReading, candidates, sentenceContext)
             }
             tokens.add(AnalyzedToken(
                 surface = surface,
@@ -86,6 +93,7 @@ class AnalysisEngine private constructor(
                 partOfSpeech = partOfSpeech,
                 dictionaryCandidates = candidates,
                 scriptUnits = kanjiUnits(surface),
+                writtenFormEvidence = writtenFormFallback && candidates.isNotEmpty(),
             ))
             index += 1
         }
@@ -169,6 +177,8 @@ class AnalysisEngine private constructor(
             }
             return result.toList()
         }
+
+        private fun isAllKanji(text: String): Boolean = text.isNotEmpty() && text.codePoints().allMatch(::isKanji)
 
         private fun isKanji(codePoint: Int): Boolean =
             codePoint in 0x3400..0x4DBF ||

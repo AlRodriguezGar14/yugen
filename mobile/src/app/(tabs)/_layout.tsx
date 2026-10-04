@@ -20,6 +20,14 @@ export default function TabLayout() {
       <Tabs.Screen
         name="index"
         options={{
+          title: 'Library',
+          tabBarLabel: 'Library',
+          tabBarIcon: ({ color }) => <Text style={{ color, fontSize: 22, lineHeight: 28 }}>文</Text>,
+        }}
+      />
+      <Tabs.Screen
+        name="capture"
+        options={{
           title: 'New capture',
           tabBarLabel: 'Capture',
           tabBarIcon: ({ color }) => <Text style={{ color, fontSize: 24, lineHeight: 28, fontWeight: '900' }}>＋</Text>,

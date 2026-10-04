@@ -1,13 +1,14 @@
-import { useRef, useState } from 'react';
+import { router, useLocalSearchParams } from 'expo-router';
+import { useEffect, useRef, useState } from 'react';
 import { StatusBar } from 'expo-status-bar';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import * as ImagePicker from 'expo-image-picker';
 import { Directory, File, Paths } from 'expo-file-system';
 import { analyzeJapaneseImage } from './src/capture/ocr';
 import CameraCapture from './src/capture/CameraCapture';
-import { markCaptureOcrFailed, selectRecognizedFindings } from './src/capture/review';
-import { saveCapture } from './src/capture/store';
-import type { CaptureRecord, CaptureSource } from './src/capture/types';
+import { markCaptureOcrFailed, rowGroupsForCapture, savedTextNotice, selectRecognizedFindings, textGroupsForCapture, unsavedRows } from './src/capture/review';
+import { loadCaptureById, saveCapture, saveTextGroup, addWordCard, loadTextGroups } from './src/capture/store';
+import type { CaptureRecord, CaptureSource, TextGroup } from './src/capture/types';
 import CaptureHome from './src/capture/CaptureHome';
 import CaptureReview from './src/capture/CaptureReview';
 import { styles } from './src/capture/uiStyles';
@@ -22,12 +23,24 @@ function newId(): string {
 }
 
 export default function App() {
+  const params = useLocalSearchParams<{ captureId?: string; groupId?: string; fresh?: string }>();
+  const resumeId = Array.isArray(params.captureId) ? params.captureId[0] : params.captureId;
   const [capture, setCapture] = useState<CaptureRecord | null>(null);
   const [showCamera, setShowCamera] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  const currentCapture = useRef(capture);
+  currentCapture.current = capture;
   const pendingDraftSave = useRef<Promise<void>>(Promise.resolve());
+
+  useEffect(() => {
+    if (!resumeId) return;
+    let active = true;
+    loadCaptureById(resumeId).then((record) => { if (active) setCapture(record); }).catch(() => { if (active) setError('This photo could not be opened.'); });
+    return () => { active = false; };
+  }, [resumeId]);
+  useEffect(() => { if (params.fresh) void Promise.resolve().then(() => { setCapture(null); router.setParams({ fresh: undefined, captureId: undefined, groupId: undefined }); }); }, [params.fresh]);
 
   async function recognize(record: CaptureRecord, ocrBounds = record.ocrBounds) {
     if (record.status === 'failed' && record.rawText) {
@@ -136,7 +149,12 @@ export default function App() {
         regions: [],
         correctedText: '',
         selectedRegionId: null,
+        joinedWithoutBreaks: false,
         status: 'selecting',
+        savedAt: null,
+        sentenceTranslation: null,
+        analysis: null,
+        analysisReview: {},
       };
       setCapture(record);
       await saveCapture(record);
@@ -145,6 +163,54 @@ export default function App() {
     } catch (error) {
       setError('The capture could not be saved. Your original photo is unchanged; try again.');
       if (source === 'camera') throw error;
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function saveSelection(source: CaptureRecord, group: TextGroup) {
+    // A row is validated by its own text; the capture-wide selection may be empty.
+    if (!group.text.trim()) {
+      setError('Select a finding or enter some text before saving.');
+      return;
+    }
+    setBusy(true);
+    setError(null);
+    try {
+      const words = await saveTextGroup(source, group);
+      setCapture(source);
+      const remaining = unsavedRows(source, new Map((await loadTextGroups(source.id)).map((item) => [item.id, item.text]))).length;
+      setNotice(savedTextNotice(words, remaining));
+    } catch {
+      setError('The correction could not be saved. Please try again.');
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function saveVocabularyWord(source: CaptureRecord, group: TextGroup, index: number, reading: string | null) {
+    if (!reading) {
+      setError('This word has no dictionary reading to save.');
+      return;
+    }
+    setBusy(true);
+    setError(null);
+    setNotice(null);
+    try {
+      // The tap may be older than the screen: the word only saves if its row still has the same text in the
+      // current capture, and it is saved with that current capture so no newer correction is overwritten.
+      const latest = currentCapture.current;
+      if (!latest || latest.id !== source.id || ![...rowGroupsForCapture(latest), ...textGroupsForCapture(latest)].some((item) => item.id === group.id && item.text === group.text)) {
+        setError('Not saved: this text changed while saving. Check it and try again.');
+        return;
+      }
+      // The word and its parent row are saved in one transaction.
+      const outcome = await addWordCard(latest, index, reading, group);
+      if (outcome === 'added') setNotice('Saved in Vocabulary.');
+      else if (outcome === 'existing') setNotice('Already in your Vocabulary.');
+      else setError('Not saved: this word needs a chosen reading and meaning. Choose one above and try again.');
+    } catch {
+      setError('The word could not be saved. Try again.');
     } finally {
       setBusy(false);
     }
@@ -178,6 +244,8 @@ export default function App() {
           }}
           onNewCapture={startNewCapture}
           onRetry={() => void recognize(capture)}
+          onSave={(reviewedCapture, group) => void saveSelection(reviewedCapture, group)}
+          onSaveWord={(source, group, index, reading) => void saveVocabularyWord(source, group, index, reading)}
         />
       ) : (
         <CaptureHome

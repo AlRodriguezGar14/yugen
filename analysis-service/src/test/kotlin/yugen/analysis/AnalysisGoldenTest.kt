@@ -205,6 +205,45 @@ class AnalysisGoldenTest {
     }
 
     @Test
+    fun basicKanjiInAnN5ListKeepTheirExactWrittenDictionaryEntriesWhenTheParserTagsThemAsSuffixes() {
+        // Actual phone OCR line: Sudachi tags 雨/魚 as suffixes (う/ぎょ) and no JMdict suffix sense exists.
+        val tokens = checkNotNull(engine).analyze(AnalyzeRequest(2, "ja", "長間雨電食飲駅高魚")).tokens
+        val rain = tokens.single { it.surface == "雨" }
+        val fish = tokens.single { it.surface == "魚" }
+
+        assertTrue(rain.dictionaryCandidates.any { it.reading == "あめ" && "rain" in it.meanings }, rain.toString())
+        assertEquals("あめ", rain.reading, "The unsupported suffix reading う must not be shown as furigana")
+        assertTrue(fish.dictionaryCandidates.any { it.reading == "さかな" && "fish" in it.meanings }, fish.toString())
+        assertTrue(fish.dictionaryCandidates.any { it.reading == "うお" }, fish.toString())
+        assertTrue(fish.reading != "ぎょ", "Two dictionary readings remain a choice, not the suffix reading: $fish")
+        assertTrue((tokens.flatMap { it.dictionaryCandidates }).none { it.recommended }, "A list is context; nothing is auto-confirmed")
+        assertTrue(tokens.filter { it.scriptUnits.isNotEmpty() }.all { it.kanjiDetails.isNotEmpty() }, "Every kanji keeps its character evidence")
+
+        val wider = checkNotNull(engine).analyze(AnalyzeRequest(2, "ja", "会何先入八六円出分前北十千")).tokens
+        assertTrue(wider.single { it.surface == "千" }.dictionaryCandidates.any { "thousand" in it.meanings }, wider.toString())
+        assertEquals("電食", tokens.single { it.surface.startsWith("電") }.surface, "Compounds are not split into characters")
+        assertTrue(rain.writtenFormEvidence && fish.writtenFormEvidence, "Fallback entries are labeled as written-form evidence")
+        assertTrue(tokens.filter { it.surface == "駅" || it.surface == "電食" }.none { it.writtenFormEvidence })
+        val short = checkNotNull(engine).analyze(AnalyzeRequest(2, "ja", "間雨")).tokens.single { it.surface == "雨" }
+        assertTrue(short.dictionaryCandidates.any { "rain" in it.meanings }, short.toString())
+        listOf("雨天", "大雨").forEach { compound ->
+            val token = checkNotNull(engine).analyze(AnalyzeRequest(2, "ja", compound)).tokens.single()
+            assertEquals(compound, token.surface)
+            assertTrue(!token.writtenFormEvidence && token.dictionaryCandidates.isNotEmpty(), token.toString())
+        }
+    }
+
+    @Test
+    fun proseKeepsItsPartOfSpeechFilteringForTheSameCharacters() {
+        val tokens = checkNotNull(engine).analyze(AnalyzeRequest(2, "ja", "魚を食べます。雨が降ります。")).tokens
+        assertEquals("さかな", tokens.first { it.surface == "魚" }.reading)
+        assertEquals("あめ", tokens.first { it.surface == "雨" }.reading)
+        val particle = tokens.first { it.surface == "を" }
+        assertTrue(particle.dictionaryCandidates.all { candidate -> candidate.meanings.none { it.contains("fish", ignoreCase = true) } })
+        assertEquals("たべ", tokens.first { it.surface == "食べ" }.reading, "Inflected surfaces keep the parser reading")
+    }
+
+    @Test
     fun isolatedInflectionKeepsSurfaceFuriganaWhileDictionaryUsesItsLemmaReading() {
         val token = checkNotNull(engine).analyze(AnalyzeRequest(2, "ja", "ください")).tokens.single()
         assertEquals("くださる", token.lemma)

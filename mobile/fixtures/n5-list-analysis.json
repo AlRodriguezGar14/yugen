@@ -1,0 +1,296 @@
+{
+  "contractVersion": 2,
+  "language": "ja",
+  "normalizedText": "長間雨電食飲駅高魚",
+  "tokens": [
+    {
+      "surface": "長間",
+      "lemma": "長間",
+      "reading": "ながま",
+      "partOfSpeech": "名詞",
+      "dictionaryCandidates": [],
+      "curatedMeaning": null,
+      "scriptUnits": [
+        "長",
+        "間"
+      ],
+      "kanjiDetails": [
+        {
+          "character": "長",
+          "meanings": [
+            "long",
+            "leader",
+            "superior",
+            "senior"
+          ],
+          "onReadings": [
+            "チョウ"
+          ],
+          "kunReadings": [
+            "なが.い",
+            "おさ"
+          ]
+        },
+        {
+          "character": "間",
+          "meanings": [
+            "interval",
+            "space"
+          ],
+          "onReadings": [
+            "カン",
+            "ケン"
+          ],
+          "kunReadings": [
+            "あいだ",
+            "ま",
+            "あい"
+          ]
+        }
+      ]
+    },
+    {
+      "surface": "雨",
+      "lemma": "雨",
+      "reading": "う",
+      "partOfSpeech": "接尾辞",
+      "dictionaryCandidates": [],
+      "curatedMeaning": null,
+      "scriptUnits": [
+        "雨"
+      ],
+      "kanjiDetails": [
+        {
+          "character": "雨",
+          "meanings": [
+            "rain"
+          ],
+          "onReadings": [
+            "ウ"
+          ],
+          "kunReadings": [
+            "あめ",
+            "あま-",
+            "-さめ"
+          ]
+        }
+      ]
+    },
+    {
+      "surface": "電食",
+      "lemma": "電食",
+      "reading": "でんしょく",
+      "partOfSpeech": "名詞",
+      "dictionaryCandidates": [
+        {
+          "id": "2040130:でんしょく",
+          "reading": "でんしょく",
+          "meanings": [
+            "electrolytic corrosion"
+          ],
+          "recommended": false
+        }
+      ],
+      "curatedMeaning": null,
+      "scriptUnits": [
+        "電",
+        "食"
+      ],
+      "kanjiDetails": [
+        {
+          "character": "電",
+          "meanings": [
+            "electricity"
+          ],
+          "onReadings": [
+            "デン"
+          ],
+          "kunReadings": []
+        },
+        {
+          "character": "食",
+          "meanings": [
+            "eat",
+            "food"
+          ],
+          "onReadings": [
+            "ショク",
+            "ジキ"
+          ],
+          "kunReadings": [
+            "く.う",
+            "く.らう",
+            "た.べる",
+            "は.む"
+          ]
+        }
+      ]
+    },
+    {
+      "surface": "飲",
+      "lemma": "飲",
+      "reading": "いん",
+      "partOfSpeech": "名詞",
+      "dictionaryCandidates": [
+        {
+          "id": "2799140:いん",
+          "reading": "いん",
+          "meanings": [
+            "drinking (sometimes esp. alcohol)",
+            "drink",
+            "drinking party"
+          ],
+          "recommended": false
+        }
+      ],
+      "curatedMeaning": null,
+      "scriptUnits": [
+        "飲"
+      ],
+      "kanjiDetails": [
+        {
+          "character": "飲",
+          "meanings": [
+            "drink",
+            "smoke",
+            "take"
+          ],
+          "onReadings": [
+            "イン",
+            "オン"
+          ],
+          "kunReadings": [
+            "の.む",
+            "-の.み"
+          ]
+        }
+      ]
+    },
+    {
+      "surface": "駅",
+      "lemma": "駅",
+      "reading": "えき",
+      "partOfSpeech": "名詞",
+      "dictionaryCandidates": [
+        {
+          "id": "1175140:えき",
+          "reading": "えき",
+          "meanings": [
+            "railway station",
+            "train station",
+            "staging post on a highway (in pre-modern Japan)",
+            "counter for railway stations and bus stations"
+          ],
+          "recommended": false
+        }
+      ],
+      "curatedMeaning": null,
+      "scriptUnits": [
+        "駅"
+      ],
+      "kanjiDetails": [
+        {
+          "character": "駅",
+          "meanings": [
+            "station"
+          ],
+          "onReadings": [
+            "エキ"
+          ],
+          "kunReadings": []
+        }
+      ]
+    },
+    {
+      "surface": "高",
+      "lemma": "高",
+      "reading": "こう",
+      "partOfSpeech": "接尾辞",
+      "dictionaryCandidates": [
+        {
+          "id": "1633260:たか",
+          "reading": "たか",
+          "meanings": [
+            "quantity",
+            "amount",
+            "volume",
+            "number",
+            "amount of money"
+          ],
+          "recommended": false
+        },
+        {
+          "id": "1633260:だか",
+          "reading": "だか",
+          "meanings": [
+            "quantity",
+            "amount",
+            "volume",
+            "number",
+            "amount of money"
+          ],
+          "recommended": false
+        },
+        {
+          "id": "2183260:こう",
+          "reading": "こう",
+          "meanings": [
+            "high school"
+          ],
+          "recommended": false
+        }
+      ],
+      "curatedMeaning": null,
+      "scriptUnits": [
+        "高"
+      ],
+      "kanjiDetails": [
+        {
+          "character": "高",
+          "meanings": [
+            "tall",
+            "high",
+            "expensive"
+          ],
+          "onReadings": [
+            "コウ"
+          ],
+          "kunReadings": [
+            "たか.い",
+            "たか",
+            "-だか",
+            "たか.まる",
+            "たか.める"
+          ]
+        }
+      ]
+    },
+    {
+      "surface": "魚",
+      "lemma": "魚",
+      "reading": "ぎょ",
+      "partOfSpeech": "接尾辞",
+      "dictionaryCandidates": [],
+      "curatedMeaning": null,
+      "scriptUnits": [
+        "魚"
+      ],
+      "kanjiDetails": [
+        {
+          "character": "魚",
+          "meanings": [
+            "fish"
+          ],
+          "onReadings": [
+            "ギョ"
+          ],
+          "kunReadings": [
+            "うお",
+            "さかな",
+            "-ざかな"
+          ]
+        }
+      ]
+    }
+  ]
+}
