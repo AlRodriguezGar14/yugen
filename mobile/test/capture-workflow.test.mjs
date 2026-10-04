@@ -775,9 +775,18 @@ test('a focused Library reloads when a card mutation commits after the user went
 
   let persisted = [{ id: 'word', captureId: 'qa', kind: 'word', lemma: '果実', reading: 'かじつ', sourceText: '果実', groupId: null, createdAt: '2026-10-04', wordSnapshot: null, personalMeaning: null }];
   const { slots, frame, tree } = await mountScreen('../src/app/(tabs)/index.tsx', {
-    'react-native-safe-area-context': {}, 'react-native': { StyleSheet: { create: (value) => value } },
-    '../../capture/store': { loadLibraryCaptures: async () => [], loadStudyCards: async () => persisted, loadPracticeCards: async () => [] }, '../../capture/entryActions': {},
-    '../../capture/review': { photoSummary: () => '' }, '../../capture/studyCards': { recordedMeaning: () => '' },
+    'react-native-safe-area-context': {}, 'react-native': {
+      StyleSheet: { create: (value) => value },
+      FlatList: ({ data, renderItem, ListHeaderComponent, ListEmptyComponent, ListFooterComponent }) => ({
+        type: 'FlatList', children: [ListHeaderComponent, data.length ? data.map((item, index) => renderItem({ item, index })) : ListEmptyComponent, ListFooterComponent],
+      }),
+    },
+    '../../capture/store': {}, '../../capture/entryActions': {},
+    '../../capture/libraryQueries': { loadLibraryPage: async (collection) => {
+      const items = persisted.filter((card) => card.kind === (collection === 'vocabulary' ? 'word' : 'sentence'))
+        .map((card) => ({ ...card, collection, imageUri: null, meaning: '', hasPractice: 0 }));
+      return { items, total: items.length, nextCursor: null };
+    } },
     '../../capture/StatusMessage': { default: () => null }, '../../capture/studyChanges': changes, '../../theme': { colors: {} },
   });
   await frame();

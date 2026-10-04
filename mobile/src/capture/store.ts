@@ -70,6 +70,8 @@ export async function database(): Promise<SQLite.SQLiteDatabase> {
         );
         CREATE UNIQUE INDEX IF NOT EXISTS word_card_identity ON study_cards(language, lemma, reading) WHERE kind = 'word';
         CREATE INDEX IF NOT EXISTS study_card_source ON study_cards(capture_id);
+        CREATE INDEX IF NOT EXISTS study_card_collection_order ON study_cards(kind, created_at DESC, id DESC);
+        CREATE INDEX IF NOT EXISTS capture_collection_order ON captures(created_at DESC, id DESC);
       `);
       if (schemaVersion < 2) await db.execAsync(`
         INSERT OR IGNORE INTO study_cards(id, capture_id, kind, language, source_text, created_at)
@@ -97,6 +99,7 @@ export async function database(): Promise<SQLite.SQLiteDatabase> {
       await db.execAsync(`
         CREATE TABLE IF NOT EXISTS practice_cards (id TEXT PRIMARY KEY NOT NULL, entry_id TEXT, answer_json TEXT, created_at TEXT NOT NULL);
         CREATE UNIQUE INDEX IF NOT EXISTS practice_card_entry ON practice_cards(entry_id) WHERE entry_id IS NOT NULL;
+        CREATE INDEX IF NOT EXISTS practice_collection_order ON practice_cards(created_at DESC, id DESC);
       `);
       // Source photo provenance survives detaching, so deleting the photo still removes its snapshot cards.
       const practiceColumns = new Set((await db.getAllAsync<{ name: string }>('PRAGMA table_info(practice_cards)')).map((column) => column.name));

@@ -1,98 +1,181 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { router, useFocusEffect } from 'expo-router';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import { ActivityIndicator, Alert, Image, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
-import { deleteCapture, deleteTextGroup, loadLibraryCaptures, loadPracticeCards, loadStudyCards, type PracticeCard, type StudyCard } from '../../capture/store';
+import { ActivityIndicator, Alert, FlatList, Image, Pressable, StyleSheet, Text, TextInput, View } from 'react-native';
+import { deleteCapture, deleteTextGroup } from '../../capture/store';
+import { loadLibraryPage, type LibraryCollection, type LibraryCursor, type LibraryEntry, type LibraryItem, type LibraryPhoto } from '../../capture/libraryQueries';
 import { confirmEntryDeletion } from '../../capture/entryActions';
-import { photoSummary } from '../../capture/review';
-import { recordedMeaning } from '../../capture/studyCards';
 import StatusMessage from '../../capture/StatusMessage';
-import { onStudyChange } from '../../capture/studyChanges';
-import type { CaptureRecord } from '../../capture/types';
+import { afterCommit, onStudyChange } from '../../capture/studyChanges';
 import { colors } from '../../theme';
 
 export default function LibraryScreen() {
-  const [collection, setCollection] = useState<'texts' | 'vocabulary' | 'practice' | 'photos'>('texts');
-  const [practiceCards, setPracticeCards] = useState<PracticeCard[]>([]);
+  const [collection, setCollection] = useState<LibraryCollection>('texts');
   const [query, setQuery] = useState('');
-  const [cards, setCards] = useState<StudyCard[]>([]);
-  const [captures, setCaptures] = useState<CaptureRecord[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
   const [loadAttempt, setLoadAttempt] = useState(0);
+  const search = query.trim();
+  const scope = `${collection}\n${search}\n${loadAttempt}`;
+  const [loadedScope, setLoadedScope] = useState('');
+  const [items, setItems] = useState<LibraryItem[]>([]);
+  const [total, setTotal] = useState(0);
+  const [cursor, setCursor] = useState<LibraryCursor | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [loadingMore, setLoadingMore] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [pageError, setPageError] = useState<string | null>(null);
   const loadGeneration = useRef(0);
+  const paging = useRef(false);
+  const focused = useRef(false);
+  const list = useRef<FlatList<LibraryItem>>(null);
   const [deletingId, setDeletingId] = useState<string | null>(null);
   const [status, setStatus] = useState<{ text: string; error: boolean } | null>(null);
 
-  // Deletes, then reloads the persisted state; the reload also cancels any older in-flight load.
   function remove(id: string, action: () => Promise<unknown>, done: string, failed: string) {
     if (deletingId) return;
-    loadGeneration.current += 1; // an in-flight load must not publish rows from before this mutation
+    loadGeneration.current += 1;
     setDeletingId(id);
     setStatus({ text: 'Deleting…', error: false });
-    action()
+    afterCommit(action())
       .then(() => setStatus({ text: done, error: false }))
       .catch(() => setStatus({ text: failed, error: true }))
       .finally(() => { setDeletingId(null); setLoadAttempt((value) => value + 1); });
   }
 
-  function confirmDelete(capture: CaptureRecord) {
+  function confirmDelete(photo: LibraryPhoto) {
     Alert.alert('Delete photo and its cards?', 'This removes the original photo, its OCR text, and every saved text, word and practice card from this photo on this device.', [
       { text: 'Cancel', style: 'cancel' },
-      { text: 'Delete photo', style: 'destructive', onPress: () => remove(capture.id, () => deleteCapture(capture.id), 'Photo and its cards deleted.', 'The photo could not be deleted. It is still in your Library; try again.') },
+      { text: 'Delete photo', style: 'destructive', onPress: () => remove(photo.id, () => deleteCapture(photo.id), 'Photo and its cards deleted.', 'The photo could not be deleted. It is still in your Library; try again.') },
     ]);
   }
 
-  function confirmDeleteText(card: StudyCard) {
-    confirmEntryDeletion('sentence', practiceCards.some((practice) => practice.entryId === card.id), (options) => remove(card.id, () => deleteTextGroup(card.groupId!, options),
+  function confirmDeleteText(card: LibraryEntry) {
+    confirmEntryDeletion('sentence', !!card.hasPractice, (options) => remove(card.id, () => deleteTextGroup(card.groupId!, options),
       options.keepPracticeCards ? 'Text deleted. Its practice card, words and photo remain.' : 'Text deleted. Its words and photo remain.', 'The text could not be deleted. Try again.'));
   }
 
-  // A card edit/delete can commit after the user already returned here; reload the persisted state when it does.
-  useEffect(() => onStudyChange(() => {
+  useEffect(() => onStudyChange((change) => {
+    if (change === 'capture' && collection !== 'photos') return;
     loadGeneration.current += 1;
     setLoadAttempt((value) => value + 1);
-  }), []);
+  }, 'all'), [collection]);
 
   useFocusEffect(useCallback(() => {
     const generation = ++loadGeneration.current;
-    const current = () => generation === loadGeneration.current;
-    let active = true;
+    focused.current = true;
+    paging.current = false;
     setLoading(true);
-    Promise.all([loadLibraryCaptures(), loadStudyCards(), loadPracticeCards()])
-      .then(([items, savedCards, practice]) => {
-        if (active && current()) {
-          setCaptures(items);
-          setCards(savedCards);
-          setPracticeCards(practice);
-          setError(null);
-        }
+    setLoadingMore(false);
+    setPageError(null);
+    setCursor(null);
+    setItems([]);
+    setTotal(0);
+    list.current?.scrollToOffset({ offset: 0, animated: false });
+    loadLibraryPage(collection, search)
+      .then((page) => {
+        if (generation !== loadGeneration.current) return;
+        setItems(page.items);
+        setTotal(page.total);
+        setCursor(page.nextCursor);
+        setLoadedScope(scope);
+        setError(null);
       })
-      .catch(() => {
-        if (active && current()) setError('Your saved sentences could not be opened. Try again.');
-      })
-      .finally(() => {
-        if (active && current()) setLoading(false);
+      .catch(() => { if (generation === loadGeneration.current) setError('Your Library could not be opened. Try again.'); })
+      .finally(() => { if (generation === loadGeneration.current) setLoading(false); });
+    return () => { focused.current = false; loadGeneration.current += 1; };
+  }, [collection, search, scope]));
+
+  async function loadMore() {
+    if (!focused.current || loading || paging.current || deletingId || !cursor || loadedScope !== scope) return;
+    const generation = loadGeneration.current;
+    paging.current = true;
+    setLoadingMore(true);
+    setPageError(null);
+    try {
+      const page = await loadLibraryPage(collection, search, cursor);
+      if (generation !== loadGeneration.current) return;
+      setItems((current) => {
+        const ids = new Set(current.map((item) => item.id));
+        return [...current, ...page.items.filter((item) => !ids.has(item.id))];
       });
-    return () => { active = false; };
-    // Retry must re-run the load while the tab remains focused.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [loadAttempt]));
+      setTotal(page.total);
+      setCursor(page.nextCursor);
+    } catch {
+      if (generation === loadGeneration.current) setPageError('More results could not be opened. Try again.');
+    } finally {
+      if (generation === loadGeneration.current) { paging.current = false; setLoadingMore(false); }
+    }
+  }
 
-  const search = query.trim().toLocaleLowerCase();
-  const savedTexts = new Map(cards.flatMap((card) => card.kind === 'sentence' && card.groupId ? [[card.groupId, card.sourceText] as const] : []));
-  // Each photo appears once; its saved texts and words open independently from the other collections.
-  const visiblePhotos = captures.filter((capture) => !search || [capture.correctedText, ...cards.filter((card) => card.captureId === capture.id).map((card) => card.sourceText)]
-    .join(' ').toLocaleLowerCase().includes(search));
-  const visibleCards = cards.filter((card) => card.kind === (collection === 'vocabulary' ? 'word' : 'sentence'))
-    .filter((card) => !search || [card.lemma, card.reading, card.sourceText, ...(card.wordSnapshot?.dictionaryCandidates.flatMap((entry) => entry.meanings) ?? []), card.wordSnapshot?.curatedMeaning ?? '', card.personalMeaning ?? ''].join(' ').toLocaleLowerCase().includes(search));
+  function renderItem({ item, index }: { item: LibraryItem; index: number }) {
+    if (item.collection === 'practice') return (
+      <Pressable accessibilityRole="button" accessibilityLabel={`Practice ${item.prompt ?? 'card'}`}
+        onPress={() => router.push({ pathname: '/practice/[id]', params: { id: item.id } })} style={({ pressed }) => [styles.savedCard, pressed && styles.pressed]}>
+        <Text style={styles.savedIndex}>{item.kind === 'word' ? 'WORD' : 'TEXT'} · PRACTICE{item.entryId ? '' : ' · INDEPENDENT'}</Text>
+        <Text numberOfLines={2} style={styles.savedText}>{item.prompt ?? 'Answer unavailable'}</Text>
+        <Text style={styles.savedDate}>Recall it, then reveal the answer</Text>
+      </Pressable>
+    );
+    if (item.collection === 'photos') return (
+      <View style={styles.savedCard}>
+        <Pressable accessibilityRole="button" accessibilityLabel={`Open photo: ${item.summary}`}
+          onPress={() => router.navigate({ pathname: '/(tabs)/capture', params: { captureId: item.id, groupId: item.groupId ?? undefined, fresh: undefined } })}
+          style={({ pressed }) => [styles.savedOpen, pressed && styles.pressed]}>
+          <Image source={{ uri: item.imageUri }} style={styles.thumbnail} />
+          <View style={styles.savedCopy}>
+            <Text style={styles.savedIndex}>{item.summary}</Text>
+            <Text numberOfLines={2} style={styles.photoText}>{item.text}</Text>
+            <Text style={styles.savedDate}>{new Date(item.createdAt).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })} · Open photo and rows</Text>
+          </View>
+          <Text style={styles.savedArrow}>›</Text>
+        </Pressable>
+        <Pressable accessibilityRole="button" accessibilityLabel="Delete this photo and its saved texts and words"
+          accessibilityState={{ disabled: !!deletingId, busy: deletingId === item.id }} disabled={!!deletingId}
+          onPress={() => confirmDelete(item)} style={({ pressed }) => [styles.deleteButton, pressed && styles.pressed, !!deletingId && styles.disabled]}>
+          <Text style={styles.deleteText}>{deletingId === item.id ? 'Deleting…' : 'Delete photo & its cards'}</Text>
+        </Pressable>
+      </View>
+    );
+    return (
+      <View style={styles.savedCard}>
+        <Pressable accessibilityRole="button" accessibilityLabel={`Study ${item.collection === 'vocabulary' ? 'word' : 'sentence'} card ${item.collection === 'vocabulary' ? item.lemma : item.sourceText}`}
+          onPress={() => router.push({ pathname: '/card/[id]', params: { id: item.id, mode: 'dictionary' } })} style={({ pressed }) => [styles.savedOpen, pressed && styles.pressed]}>
+          {item.imageUri && <Image source={{ uri: item.imageUri }} style={styles.thumbnail} />}
+          <View style={styles.savedCopy}>
+            <Text style={styles.savedIndex}>{String(index + 1).padStart(2, '0')} · {item.collection === 'vocabulary' ? 'WORD' : 'TEXT'}</Text>
+            {item.collection === 'vocabulary' && <Text style={styles.vocabularyReading}>{item.reading}</Text>}
+            <Text numberOfLines={2} style={styles.savedText}>{item.collection === 'vocabulary' ? item.lemma : item.sourceText}</Text>
+            {item.collection === 'vocabulary' && <Text style={styles.vocabularyMeaning}>{item.personalMeaning ? `Your meaning · ${item.personalMeaning}` : item.meaning}</Text>}
+            <Text style={styles.savedDate}>{new Date(item.createdAt).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })}
+              {' · '}{item.collection === 'vocabulary' ? 'Meaning, kanji, photo, practice' : 'Readings, meanings, photo, practice'}</Text>
+          </View>
+          <Text style={styles.savedArrow}>›</Text>
+        </Pressable>
+        {item.collection === 'texts' && item.groupId && <Pressable accessibilityRole="button" accessibilityLabel={`Delete text ${item.sourceText}`}
+          accessibilityState={{ disabled: !!deletingId, busy: deletingId === item.id }} disabled={!!deletingId} onPress={() => confirmDeleteText(item)} style={[styles.deleteButton, !!deletingId && styles.disabled]}>
+          <Text style={styles.deleteText}>{deletingId === item.id ? 'Deleting…' : 'Delete text'}</Text>
+        </Pressable>}
+      </View>
+    );
+  }
 
-  const visiblePractice = practiceCards.filter((practice) => !search || (practice.answer?.prompt ?? '').toLocaleLowerCase().includes(search));
-  const count = collection === 'photos' ? visiblePhotos.length : collection === 'practice' ? visiblePractice.length : visibleCards.length;
+  const empty = loading || loadedScope !== scope && !error ? <ActivityIndicator color={colors.green} style={styles.loader} /> : error ? (
+    <View style={styles.emptyCard}>
+      <Text style={styles.emptyTitle}>Library unavailable</Text><Text style={styles.emptyCopy}>{error}</Text>
+      <Pressable accessibilityRole="button" onPress={() => setLoadAttempt((value) => value + 1)} style={styles.retryButton}><Text style={styles.retryText}>Retry loading Library</Text></Pressable>
+    </View>
+  ) : (
+    <View style={styles.emptyCard}>
+      <Text style={styles.emptyTitle}>{collection === 'practice' ? 'No practice cards yet.' : collection === 'photos' ? 'No photos yet.' : collection === 'vocabulary' ? 'No words yet.' : 'No saved texts yet.'}</Text>
+      <Text style={styles.emptyCopy}>{collection === 'practice' ? 'Open a saved text or word and tap Create practice card. Entries never become cards automatically.' : collection === 'photos' ? 'Every photo you take or choose appears here, saved or not.' : 'Read a photo and tap Save row. The row appears in Saved texts; its words with a clear dictionary meaning appear in Vocabulary.'}</Text>
+    </View>
+  );
 
   return (
     <SafeAreaView style={styles.screen} edges={['top']}>
-      <ScrollView contentContainerStyle={styles.content}>
+      <FlatList ref={list} data={loading || error || loadedScope !== scope ? [] : items} renderItem={renderItem} keyExtractor={(item) => item.id}
+        contentContainerStyle={styles.content} keyboardShouldPersistTaps="handled" onEndReached={() => { if (!pageError) void loadMore(); }} onEndReachedThreshold={0.5}
+        ItemSeparatorComponent={() => <View style={{ height: 16 }} />} ListEmptyComponent={empty}
+        ListHeaderComponent={<View>
         <View style={styles.header}>
           <View style={styles.brandMark}><Text style={styles.brandKanji}>幽</Text></View>
           <Text style={styles.heading}>Library</Text>
@@ -114,127 +197,18 @@ export default function LibraryScreen() {
         <TextInput accessibilityLabel={`Search ${collection}`} placeholder={collection === 'vocabulary' ? 'Search words, readings, meanings' : 'Search text'} value={query} onChangeText={setQuery} style={styles.search} />
         <View style={styles.sectionHeader}>
           <Text style={styles.sectionTitle}>{collection === 'texts' ? 'Saved texts' : collection === 'vocabulary' ? 'My vocabulary' : collection === 'practice' ? 'Practice cards' : 'Photo sources'}</Text>
-          <Text style={styles.count}>{count.toString().padStart(2, '0')}</Text>
+          <Text style={styles.count}>{(loadedScope === scope ? total : 0).toString().padStart(2, '0')}</Text>
         </View>
         <StatusMessage text={status?.text ?? null} error={status?.error} />
 
-        {loading ? (
-          <ActivityIndicator color={colors.green} style={styles.loader} />
-        ) : error ? (
-          <View style={styles.emptyCard}>
-            <Text style={styles.emptyTitle}>Library unavailable</Text>
-            <Text style={styles.emptyCopy}>{error}</Text>
-            <Pressable accessibilityRole="button" onPress={() => setLoadAttempt((value) => value + 1)} style={styles.retryButton}>
-              <Text style={styles.retryText}>Retry loading Library</Text>
-            </Pressable>
-          </View>
-        ) : collection === 'practice' ? visiblePractice.length ? (
-          <View style={styles.captureList}>
-            {visiblePractice.map((practice) => (
-              <Pressable key={practice.id} accessibilityRole="button" accessibilityLabel={`Practice ${practice.answer?.prompt ?? 'card'}`}
-                onPress={() => router.push({ pathname: '/practice/[id]', params: { id: practice.id } })} style={({ pressed }) => [styles.savedCard, pressed && styles.pressed]}>
-                <Text style={styles.savedIndex}>{practice.answer?.kind === 'word' ? 'WORD' : 'TEXT'} · PRACTICE{practice.entryId ? '' : ' · INDEPENDENT'}</Text>
-                <Text numberOfLines={2} style={styles.savedText}>{practice.answer?.prompt ?? 'Answer unavailable'}</Text>
-                <Text style={styles.savedDate}>Recall it, then reveal the answer</Text>
-              </Pressable>
-            ))}
-          </View>
-        ) : (
-          <View style={styles.emptyCard}>
-            <Text style={styles.emptyTitle}>No practice cards yet.</Text>
-            <Text style={styles.emptyCopy}>Open a saved text or word and tap Create practice card. Entries never become cards automatically.</Text>
-          </View>
-        ) : collection === 'photos' ? visiblePhotos.length ? (
-          <View style={styles.captureList}>
-            {visiblePhotos.map((capture) => {
-              const sourceCards = cards.filter((card) => card.captureId === capture.id);
-              const words = sourceCards.filter((card) => card.kind === 'word').length;
-              return (
-                <View key={capture.id} style={styles.savedCard}>
-                  <Pressable
-                    accessibilityRole="button"
-                    accessibilityLabel={`Open photo: ${photoSummary(capture, savedTexts, words)}`}
-                    onPress={() => router.navigate({ pathname: '/(tabs)/capture', params: { captureId: capture.id, groupId: sourceCards.find((card) => card.groupId)?.groupId ?? undefined, fresh: undefined } })}
-                    style={({ pressed }) => [styles.savedOpen, pressed && styles.pressed]}
-                  >
-                    <Image source={{ uri: capture.imageUri }} style={styles.thumbnail} />
-                    <View style={styles.savedCopy}>
-                      <Text style={styles.savedIndex}>{photoSummary(capture, savedTexts, words)}</Text>
-                      <Text numberOfLines={2} style={styles.photoText}>{capture.correctedText || capture.rawText || 'Photo'}</Text>
-                      <Text style={styles.savedDate}>{new Date(capture.createdAt).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })} · Open photo and rows</Text>
-                    </View>
-                    <Text style={styles.savedArrow}>›</Text>
-                  </Pressable>
-                  <Pressable
-                    accessibilityRole="button"
-                    accessibilityLabel="Delete this photo and its saved texts and words"
-                    accessibilityState={{ disabled: !!deletingId, busy: deletingId === capture.id }}
-                    disabled={!!deletingId}
-                    onPress={() => confirmDelete(capture)}
-                    style={({ pressed }) => [styles.deleteButton, pressed && styles.pressed, !!deletingId && styles.disabled]}
-                  >
-                    <Text style={styles.deleteText}>{deletingId === capture.id ? 'Deleting…' : 'Delete photo & its cards'}</Text>
-                  </Pressable>
-                </View>
-              );
-            })}
-          </View>
-        ) : (
-          <View style={styles.emptyCard}>
-            <Text style={styles.emptyTitle}>No photos yet.</Text>
-            <Text style={styles.emptyCopy}>Every photo you take or choose appears here, saved or not.</Text>
-          </View>
-        ) : visibleCards.length ? (
-          <View style={styles.captureList}>
-            {visibleCards.map((card, index) => {
-              const capture = captures.find((item) => item.id === card.captureId);
-              return (
-              <View
-                key={card.id}
-                style={styles.savedCard}
-              >
-                <Pressable
-                  accessibilityRole="button"
-                  accessibilityLabel={`Study ${card.kind} card ${card.kind === 'word' ? card.lemma : card.sourceText}`}
-                  onPress={() => router.push({ pathname: '/card/[id]', params: { id: card.id, mode: 'dictionary' } })}
-                  style={({ pressed }) => [styles.savedOpen, pressed && styles.pressed]}
-                >
-                  {capture && <Image source={{ uri: capture.imageUri }} style={styles.thumbnail} />}
-                  <View style={styles.savedCopy}>
-                    <Text style={styles.savedIndex}>{String(index + 1).padStart(2, '0')} · {card.kind === 'word' ? 'WORD' : 'TEXT'}</Text>
-                    {collection === 'vocabulary' && <Text style={styles.vocabularyReading}>{card.reading}</Text>}
-                    <Text numberOfLines={2} style={styles.savedText}>{card.kind === 'word' ? card.lemma : card.sourceText}</Text>
-                    {collection === 'vocabulary' && card.personalMeaning && <Text style={styles.vocabularyMeaning}>Your meaning · {card.personalMeaning}</Text>}
-                    {collection === 'vocabulary' && !card.personalMeaning && <Text style={styles.vocabularyMeaning}>{recordedMeaning(card)}</Text>}
-                    <Text style={styles.savedDate}>
-                      {new Date(card.createdAt).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })}
-                      {' · '}{collection === 'vocabulary' ? 'Meaning, kanji, photo, practice' : 'Readings, meanings, photo, practice'}
-                    </Text>
-                  </View>
-                  <Text style={styles.savedArrow}>›</Text>
-                </Pressable>
-                {collection === 'texts' && card.groupId && (
-                  <Pressable accessibilityRole="button" accessibilityLabel={`Delete text ${card.sourceText}`} accessibilityState={{ disabled: !!deletingId, busy: deletingId === card.id }}
-                    disabled={!!deletingId} onPress={() => confirmDeleteText(card)} style={[styles.deleteButton, !!deletingId && styles.disabled]}>
-                    <Text style={styles.deleteText}>{deletingId === card.id ? 'Deleting…' : 'Delete text'}</Text>
-                  </Pressable>
-                )}
-              </View>
-              );
-            })}
-          </View>
-        ) : (
-          <View style={styles.emptyCard}>
-            <Text style={styles.emptyIndex}>FIRST NOTE</Text>
-            <Text style={styles.emptyTitle}>{collection === 'vocabulary' ? 'No words yet.' : 'No saved texts yet.'}</Text>
-            <Text style={styles.emptyCopy}>Read a photo and tap Save row. The row appears in Saved texts; its words with a clear dictionary meaning appear in Vocabulary.</Text>
-          </View>
-        )}
-        <Pressable accessibilityRole="button" onPress={() => router.push('/sources')} style={styles.sourcesLink}>
-          <Text style={styles.sourcesText}>Sources &amp; licenses</Text>
-          <Text style={styles.sourcesArrow}>↗</Text>
-        </Pressable>
-      </ScrollView>
+        </View>}
+        ListFooterComponent={<View>
+          {loadingMore && <ActivityIndicator accessibilityLabel="Loading more results" color={colors.green} />}
+          {pageError && <Pressable accessibilityRole="button" onPress={() => void loadMore()} style={styles.retryButton}><Text style={styles.retryText}>{pageError}</Text></Pressable>}
+          <Pressable accessibilityRole="button" onPress={() => router.push('/sources')} style={styles.sourcesLink}>
+            <Text style={styles.sourcesText}>Sources &amp; licenses</Text><Text style={styles.sourcesArrow}>↗</Text>
+          </Pressable>
+        </View>} />
     </SafeAreaView>
   );
 }
