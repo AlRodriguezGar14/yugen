@@ -6,6 +6,14 @@ any data is bundled or distributed.
 
 ## JMdict and KANJIDIC2
 
+JMdict supplies word glosses; KANJIDIC2 supplies English character meanings and
+Japanese on/kun readings. Local setup fetches the current feeds and records
+retrieval dates and archive SHA-256 in ignored `analysis-service/.data/manifest.txt`.
+Run `analysis-service/scripts/setup-data.sh` regularly to refresh them; the
+normal launcher uses `--missing` to avoid downloading existing files again.
+KANJIDIC2 documentation: https://www.edrdg.org/wiki/KANJIDIC_Project.html
+
+
 Copyright belongs to the Electronic Dictionary Research and Development Group.
 Use is subject to the EDRDG dictionary license, including attribution and
 share-alike requirements for adapted data. The EDRDG license permits commercial

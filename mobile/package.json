@@ -30,18 +30,19 @@
   },
   "scripts": {
     "start": "expo start",
-    "start:dev-client": "expo start --dev-client",
+    "start:dev-client": "sh ./scripts/start-dev.sh",
     "android": "expo run:android",
     "android:device": "expo run:android --device",
     "ios": "expo run:ios",
-    "ios:device": "expo run:ios --device",
+    "ios:device": "sh ./scripts/start-dev.sh",
     "web": "expo start --web",
     "lint": "expo lint",
     "typecheck": "tsc --noEmit",
     "doctor": "pnpm dlx expo-doctor",
     "test:capture": "node --test test/capture-record.fixture.test.mjs",
     "test:store": "node --experimental-test-module-mocks --test test/capture-store.test.mjs",
-    "test:workflow": "node --test test/capture-workflow.test.mjs"
+    "test:workflow": "node --test test/capture-workflow.test.mjs",
+    "test:launcher": "python3 test/dev-launcher.check.py"
   },
   "private": true
 }
